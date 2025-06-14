@@ -1,0 +1,30 @@
+appId: com.contextor.app
+productName: Contextor
+directories:
+  output: dist
+  buildResources: build
+files:
+  - "dist/**/*"
+  - "package.json"
+mac:
+  category: public.app-category.productivity
+  icon: build/icon.icns
+  target:
+    - dmg
+    - zip
+  darkModeSupport: true
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+dmg:
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: "link"
+      path: "/Applications"
+  window:
+    width: 540
+    height: 380 

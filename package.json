@@ -1,0 +1,82 @@
+{
+  "name": "contextor",
+  "productName": "Contextor",
+  "version": "1.0.0",
+  "description": "Cross-platform desktop app using Electron, React, and TypeScript",
+  "main": "dist/main.js",
+  "scripts": {
+    "start": "electron dist/main.js",
+    "dev": "concurrently \"npm:build:main:watch\" \"webpack --config webpack.config.js --mode development --watch\" \"serve dist -p 8080\" \"wait-on http://localhost:8080 && electron dist/main.js\"",
+    "build": "npm run build:main && npm run build:webpack && electron-builder",
+    "build:main": "tsc",
+    "build:main:watch": "tsc --watch",
+    "build:webpack": "webpack --config webpack.config.js --mode production",
+    "build:electron": "electron-builder"
+  },
+  "build": {
+    "appId": "com.contextor.prototype",
+    "mac": {
+      "category": "public.app-category.utilities"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "buildResources": "assets",
+      "output": "release"
+    }
+  },
+  "keywords": [
+    "electron",
+    "react",
+    "typescript"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.828.0",
+    "@google-cloud/speech": "^7.1.0",
+    "@google/generative-ai": "^0.24.1",
+    "@types/react-syntax-highlighter": "^15.5.13",
+    "@types/uuid": "^10.0.0",
+    "axios": "^1.9.0",
+    "electron-is-dev": "^2.0.0",
+    "marked": "^15.0.12",
+    "node-record-lpcm16": "^1.0.1",
+    "openai": "^5.0.1",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "rehype-highlight": "^7.0.2",
+    "rehype-raw": "^7.0.0",
+    "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "assert": "^2.1.0",
+    "buffer": "^6.0.3",
+    "concurrently": "^8.2.2",
+    "copy-webpack-plugin": "^13.0.0",
+    "cross-env": "^7.0.3",
+    "crypto-browserify": "^3.12.1",
+    "css-loader": "^6.8.0",
+    "electron": "^36.3.2",
+    "electron-builder": "^24.0.0",
+    "html-webpack-plugin": "^5.5.0",
+    "path-browserify": "^1.0.1",
+    "process": "^0.11.10",
+    "serve": "^14.2.4",
+    "stream-browserify": "^3.0.0",
+    "style-loader": "^3.3.0",
+    "ts-loader": "^9.4.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.0.0",
+    "util": "^0.12.5",
+    "wait-on": "^7.2.0",
+    "webpack": "^5.0.0",
+    "webpack-cli": "^5.0.0",
+    "webpack-dev-server": "^4.0.0"
+  }
+}
