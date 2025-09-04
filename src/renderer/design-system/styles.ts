@@ -1,7 +1,12 @@
 import { CSSProperties } from 'react';
 import { tokens } from './tokens';
 
-// Style generator functions
+// Types
+type ButtonVariant = 'primary' | 'secondary' | 'payment';
+type ControlButtonVariant = 'play' | 'screenshot' | 'options' | 'drag' | 'payment' | 'chat';
+type MessageType = 'user' | 'assistant' | 'screenshot';
+
+// Utility Functions
 export const createGlassStyle = (opacity = 0.95): CSSProperties => ({
   background: `rgba(255, 255, 255, ${opacity})`,
   backdropFilter: 'blur(20px)',
@@ -10,7 +15,24 @@ export const createGlassStyle = (opacity = 0.95): CSSProperties => ({
   border: '1px solid rgba(255, 255, 255, 0.2)',
 });
 
-// Hover effect classes
+export const getButtonState = (isPlaying: boolean, variant: ControlButtonVariant): boolean => {
+  switch (variant) {
+    case 'play':
+      return isPlaying;
+    case 'drag':
+      return isPlaying; // For drag toggle, isPlaying represents showDragCursor
+    case 'payment':
+      return true; // Payment button is always highlighted until payment is confirmed
+    case 'chat':
+      return isPlaying; // For chat toggle, isPlaying represents isChat
+    case 'screenshot':
+    case 'options':
+    default:
+      return false;
+  }
+};
+
+// Animation Effects
 export const hoverEffects = {
   messageHover: {
     transform: 'translateY(-1px)',
@@ -23,43 +45,49 @@ export const hoverEffects = {
   },
 } as const;
 
-// Component style presets
+// Component Style Presets
 export const styles = {
-  // Layout
+  // Layout Components
   container: {
     position: 'absolute' as const,
     top: 0,
     left: 0,
-    width: '400px',
-    height: 'auto',
     display: 'flex' as const,
     flexDirection: 'row' as const,
     background: 'transparent',
     pointerEvents: 'none' as const,
+    overflow: 'hidden',
+    maxHeight: '100vh',
+    width: '100%',
+    maxWidth: '100vw',
+    height: '100%',
   },
 
   floatingContainer: {
     position: 'relative',
     zIndex: tokens.zIndex.app,
     cursor: 'move',
+    width: '100%',
     userSelect: 'none',
     WebkitUserSelect: 'none',
     display: 'flex',
     flexDirection: 'column',
     pointerEvents: 'auto',
-    width: '400px',
     height: 'auto',
     transition: 'transform 0.2s ease-in-out',
+    overflow: 'hidden',
+    backgroundColor: 'black',
+    maxWidth: '100%',
+    maxHeight: '100vh',
   } as CSSProperties,
 
-  // Insights Panel
+  // Chat Components
   insightsPanel: {
     ...createGlassStyle(0.98),
-    width: '400px',
-    padding: 0,
+    padding: '5px',
     height: '400px',
-    borderTopLeftRadius: '24px',
-    borderTopRightRadius: '24px',
+    borderTopLeftRadius: '0px',
+    borderTopRightRadius: '0px',
     boxSizing: 'border-box' as const,
     userSelect: 'none',
     display: 'flex',
@@ -71,17 +99,17 @@ export const styles = {
     transition: 'all 0.2s ease-in-out',
   },
 
-  // Chat Messages Container
   messagesContainer: {
     flex: 1,
-    overflowY: 'auto',
+    overflowY: 'scroll',
+    width: '100%',
     overflowX: 'hidden',
-    padding: tokens.spacing.md,
     display: 'flex',
     flexDirection: 'column',
     gap: tokens.spacing.md,
     backgroundColor: 'rgba(248, 250, 252, 1)',
     scrollbarWidth: 'thin',
+    height: 'calc(100% - 60px)', // Subtract input container height
     '&::-webkit-scrollbar': {
       width: '6px',
     },
@@ -89,35 +117,40 @@ export const styles = {
       backgroundColor: 'rgba(0, 0, 0, 0.2)',
       borderRadius: '3px',
     },
+    '&::-webkit-scrollbar-track': {
+      backgroundColor: 'transparent',
+    },
   } as CSSProperties,
 
-  // Message Bubbles
+  // Message Styles
   messageUser: {
     alignSelf: 'flex-end',
-    maxWidth: '80%',
-    padding: `${tokens.spacing.md} ${tokens.spacing.lg}`,
-    background: 'linear-gradient(135deg, #007AFF, #0055FF)',
-    color: 'white',
-    borderRadius: '20px 20px 4px 20px',
+    maxWidth: '75%',
+    padding: '5px',
+    background: 'linear-gradient(135deg, #DCF8C6 0%, #B9F5A7 100%)',
+    color: '#222',
+    borderRadius: '16px 16px 4px 16px',
     fontSize: tokens.typography.fontSize.sm,
     lineHeight: tokens.typography.lineHeight.normal,
     wordWrap: 'break-word',
-    boxShadow: '0 2px 8px rgba(0, 122, 255, 0.2)',
+    boxShadow: '0 1px 2px rgba(0,0,0,0.08)',
+    border: '1px solid #e2e2e2',
     transition: 'transform 0.2s ease-in-out',
   } as CSSProperties,
 
   messageAssistant: {
     alignSelf: 'flex-start',
-    maxWidth: '80%',
-    padding: `${tokens.spacing.md} ${tokens.spacing.lg}`,
-    background: 'rgba(255, 255, 255, 0.95)',
+    maxWidth: '75%',
+    padding: '5px 5px',
+    background: 'linear-gradient(135deg, #fff 80%, #f0f0f0 100%)',
     color: tokens.colors.text.primary,
-    borderRadius: '20px 20px 20px 4px',
+    borderRadius: '16px 16px 16px 4px',
     fontSize: tokens.typography.fontSize.sm,
     lineHeight: tokens.typography.lineHeight.normal,
     wordWrap: 'break-word',
-    boxShadow: '0 2px 8px rgba(0, 0, 0, 0.05)',
-    border: '1px solid rgba(0, 0, 0, 0.06)',
+    boxShadow: '0 1px 2px rgba(0,0,0,0.06)',
+    marginBottom: '2px',
+    border: '1px solid #e2e2e2',
     transition: 'transform 0.2s ease-in-out',
   } as CSSProperties,
 
@@ -133,28 +166,47 @@ export const styles = {
     transition: 'transform 0.2s ease-in-out',
   } as CSSProperties,
 
-  // Chat Input Area
+  cameraButton: {
+    padding: '10px',
+    backgroundColor: '#000000',
+    color: 'white',
+    border: 'none',
+    borderRadius: '8px',
+    cursor: 'pointer',
+    opacity: 1,
+    transition: 'all 0.2s ease',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '40px',
+    height: '40px',
+  } as CSSProperties,
+
+  // Input Components
   chatInputContainer: {
-    padding: tokens.spacing.md,
+    width: '100%',
+    padding: '5px',
     borderTop: '1px solid rgba(0, 0, 0, 0.06)',
     background: 'rgba(255, 255, 255, 0.98)',
     display: 'flex',
-    gap: tokens.spacing.sm,
-    alignItems: 'flex-end',
+    gap: '4px',
+    alignItems: 'center',
     backdropFilter: 'blur(10px)',
     WebkitBackdropFilter: 'blur(10px)',
+    height: '50px', // Fixed height for input container
+    flexShrink: 0, // Prevent input container from shrinking
   } as CSSProperties,
 
   chatInput: {
     flex: 1,
-    padding: `${tokens.spacing.sm} ${tokens.spacing.md}`,
+    padding: `5px`,
     borderRadius: '20px',
     border: '1px solid rgba(0, 0, 0, 0.1)',
     fontSize: tokens.typography.fontSize.sm,
-    fontFamily: tokens.typography.fontFamily.system,
+    fontFamily: 'Helvetica, "Helvetica Neue", Arial, sans-serif',
     outline: 'none',
     resize: 'none' as const,
-    height: '40px',
+    height: '22px',
     backgroundColor: 'rgba(255, 255, 255, 0.9)',
     transition: 'all 0.2s ease-in-out',
     '&:focus': {
@@ -164,10 +216,10 @@ export const styles = {
   } as CSSProperties,
 
   sendButton: (disabled: boolean): CSSProperties => ({
-    padding: `${tokens.spacing.sm} ${tokens.spacing.lg}`,
+    margin: '5px',
     borderRadius: '20px',
     border: 'none',
-    background: disabled ? 'rgba(0, 0, 0, 0.1)' : 'linear-gradient(135deg, #007AFF, #0055FF)',
+    background: disabled ? 'rgba(0, 0, 0, 0.1)' : '#000000',
     color: 'white',
     cursor: disabled ? 'not-allowed' : 'pointer',
     fontSize: tokens.typography.fontSize.sm,
@@ -176,38 +228,13 @@ export const styles = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    minWidth: '60px',
+    minWidth: '50px',
     height: '40px',
-    fontFamily: tokens.typography.fontFamily.system,
-    boxShadow: disabled ? 'none' : '0 2px 8px rgba(0, 122, 255, 0.2)',
+    fontFamily: 'Helvetica, "Helvetica Neue", Arial, sans-serif',
+    boxShadow: disabled ? 'none' : '0 2px 8px #000000',
   }),
 
-  loadingText: {
-    fontSize: tokens.typography.fontSize.sm,
-    color: tokens.colors.text.loading,
-    textAlign: 'center' as const,
-    padding: tokens.spacing.xl,
-  },
-
-  // Legacy styles for backward compatibility
-  insightsText: {
-    whiteSpace: 'pre-line' as const,
-    fontSize: tokens.typography.fontSize.sm,
-    color: tokens.colors.text.primary,
-    marginTop: 0,
-    lineHeight: tokens.typography.lineHeight.normal,
-    fontFamily: tokens.typography.fontFamily.system,
-    overflowY: 'auto',
-    overflowX: 'hidden',
-    flex: 1,
-    padding: tokens.spacing.sm,
-    height: '100%',
-    position: 'relative' as const,
-    cursor: 'auto',
-    backgroundColor: 'rgba(248, 250, 252, 1)',
-  },
-
-  // Player Bar
+  // Player Bar Components
   playerBarWrapper: {
     width: '100%',
     display: 'flex',
@@ -222,20 +249,18 @@ export const styles = {
     background: 'rgba(0, 0, 0, 0.8)',
     backdropFilter: 'blur(20px)',
     WebkitBackdropFilter: 'blur(20px)',
-    borderBottomLeftRadius: '24px',
-    borderBottomRightRadius: '24px',
+    borderBottomLeftRadius: '0px',
+    borderBottomRightRadius: '0px',
     boxShadow: '0 -4px 24px rgba(0, 0, 0, 0.2)',
-    width: '240px',
     height: '64px',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
     padding: '0',
     boxSizing: 'border-box',
-    fontFamily: tokens.typography.fontFamily.system,
+    fontFamily: 'Helvetica, "Helvetica Neue", Arial, sans-serif',
     zIndex: tokens.zIndex.controls,
     transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-    transform: isHovered ? 'translateY(-4px) scale(1.02)' : 'translateY(0) scale(1)',
     cursor: 'default',
     pointerEvents: 'auto',
     border: '1px solid rgba(255, 255, 255, 0.1)',
@@ -251,8 +276,8 @@ export const styles = {
     width: 'auto',
   },
 
-  // Buttons
-  button: (isActive: boolean, variant: 'primary' | 'secondary' | 'payment' = 'secondary'): CSSProperties => ({
+  // Button Components
+  button: (isActive: boolean, variant: ButtonVariant = 'secondary'): CSSProperties => ({
     padding: `${tokens.spacing.xs} ${tokens.spacing.md}`,
     borderRadius: '20px',
     border: 'none',
@@ -275,31 +300,147 @@ export const styles = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    fontFamily: tokens.typography.fontFamily.system,
+    fontFamily: 'Helvetica, "Helvetica Neue", Arial, sans-serif',
     animation: variant === 'payment' ? 'pulse 2s infinite' : 'none',
   }),
 
-  // Icons
+  // Icon Components
   icon: {
     width: '20px',
     height: '20px',
     fill: 'none',
     transition: 'transform 0.2s ease-in-out',
   },
-} as const;
 
-// Utility functions
-export const getButtonState = (isPlaying: boolean, variant: 'play' | 'screenshot' | 'options' | 'drag' | 'payment') => {
-  switch (variant) {
-    case 'play':
-      return isPlaying;
-    case 'drag':
-      return isPlaying; // For drag toggle, isPlaying represents showDragCursor
-    case 'payment':
-      return true; // Payment button is always highlighted until payment is confirmed
-    case 'screenshot':
-    case 'options':
-    default:
-      return false;
-  }
-}; 
+  // Audio Recorder Styles
+  errorBanner: {
+    background: 'linear-gradient(135deg, #ff6b6b 0%, #ee5a52 100%)',
+    color: 'white',
+    padding: '8px 12px',
+    borderRadius: '8px',
+    marginBottom: '8px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    fontSize: tokens.typography.fontSize.sm,
+    boxShadow: '0 2px 8px rgba(255, 107, 107, 0.3)',
+  } as CSSProperties,
+
+  errorDismissButton: {
+    background: 'none',
+    border: 'none',
+    color: 'white',
+    fontSize: '18px',
+    cursor: 'pointer',
+    padding: '0 4px',
+    borderRadius: '4px',
+    transition: 'background-color 0.2s ease',
+    ':hover': {
+      backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    },
+  } as CSSProperties,
+
+  recordingStatus: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '8px 12px',
+    background: 'rgba(255, 255, 255, 0.95)',
+    borderRadius: '8px',
+    marginBottom: '8px',
+    boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)',
+  } as CSSProperties,
+
+  recordingIndicator: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    color: '#e74c3c',
+    fontWeight: 'bold',
+    fontSize: tokens.typography.fontSize.sm,
+  } as CSSProperties,
+
+  pulseDot: {
+    width: '8px',
+    height: '8px',
+    borderRadius: '50%',
+    backgroundColor: '#e74c3c',
+    animation: 'pulse 1.5s ease-in-out infinite',
+  } as CSSProperties,
+
+  recordingDuration: {
+    fontFamily: 'monospace',
+    fontSize: tokens.typography.fontSize.sm,
+    color: '#666',
+    fontWeight: 'bold',
+  } as CSSProperties,
+
+  audioSources: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+    marginBottom: '12px',
+  } as CSSProperties,
+
+  sourceStatus: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '4px 8px',
+    background: 'rgba(255, 255, 255, 0.8)',
+    borderRadius: '6px',
+    fontSize: tokens.typography.fontSize.xs,
+  } as CSSProperties,
+
+  recordButton: {
+    background: 'linear-gradient(135deg, #4CAF50 0%, #45a049 100%)',
+    color: 'white',
+    border: 'none',
+    borderRadius: '12px',
+    padding: '12px 20px',
+    cursor: 'pointer',
+    fontSize: tokens.typography.fontSize.sm,
+    fontWeight: 'bold',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    transition: 'all 0.2s ease-in-out',
+    boxShadow: '0 4px 12px rgba(76, 175, 80, 0.3)',
+    width: '100%',
+    justifyContent: 'center',
+  } as CSSProperties,
+
+  recordButtonRecording: {
+    background: 'linear-gradient(135deg, #e74c3c 0%, #c0392b 100%)',
+    boxShadow: '0 4px 12px rgba(231, 76, 60, 0.3)',
+    transform: 'scale(1.02)',
+  } as CSSProperties,
+
+  recordButtonDisabled: {
+    background: '#ccc',
+    cursor: 'not-allowed',
+    boxShadow: 'none',
+    opacity: 0.6,
+  } as CSSProperties,
+
+  stopIcon: {
+    width: '16px',
+    height: '16px',
+    backgroundColor: 'white',
+    borderRadius: '2px',
+  } as CSSProperties,
+
+  micIcon: {
+    fontSize: '16px',
+  } as CSSProperties,
+
+  instructions: {
+    marginTop: '12px',
+    padding: '8px 12px',
+    background: 'rgba(255, 255, 255, 0.9)',
+    borderRadius: '8px',
+    fontSize: tokens.typography.fontSize.xs,
+    color: '#666',
+    lineHeight: '1.4',
+  } as CSSProperties,
+} as const;

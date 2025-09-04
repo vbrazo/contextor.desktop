@@ -4,7 +4,7 @@ import { styles, getButtonState } from '../design-system/styles';
 interface ControlButtonProps {
   onClick: () => void;
   children: ReactNode;
-  variant: 'play' | 'screenshot' | 'options' | 'drag' | 'payment';
+  variant: 'drag' | 'payment' | 'play' | 'screenshot' | 'options' | 'chat';
   isPlaying?: boolean;
   className?: string;
 }
@@ -19,7 +19,7 @@ export const ControlButton: React.FC<ControlButtonProps> = ({
   const isActive = getButtonState(isPlaying, variant);
 
   const handleClick = (e: React.MouseEvent) => {
-    e.stopPropagation(); // Prevent drag when clicking buttons
+    e.stopPropagation();
     onClick();
   };
 
@@ -32,4 +32,4 @@ export const ControlButton: React.FC<ControlButtonProps> = ({
       {children}
     </button>
   );
-}; 
+};

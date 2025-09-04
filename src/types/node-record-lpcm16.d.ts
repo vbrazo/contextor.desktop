@@ -1,4 +1,6 @@
 declare module 'node-record-lpcm16' {
+  import { Readable } from 'stream';
+
   interface RecordOptions {
     sampleRateHertz?: number;
     threshold?: number;
@@ -7,11 +9,22 @@ declare module 'node-record-lpcm16' {
     silence?: string;
   }
 
-  interface RecordStream {
-    on(event: string, callback: (data: any) => void): RecordStream;
-    pipe(destination: any): RecordStream;
+  interface Recording {
+    options: any;
+    cmd: string;
+    args: string[];
+    cmdOptions: any;
+    process: any;
+    _stream: Readable;
+    start(): void;
+    stop(): void;
+    pause(): void;
+    resume(): void;
+    isPaused(): boolean;
+    stream(): Readable;
   }
 
-  export function start(options?: RecordOptions): RecordStream;
-  export function stop(): void;
-} 
+  function record(options?: RecordOptions): Recording;
+  
+  export { record };
+}

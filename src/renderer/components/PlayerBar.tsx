@@ -1,76 +1,77 @@
-import React, { forwardRef } from 'react';
-import { styles } from '../design-system/styles';
-import { ControlButton } from './ControlButton';
-import { MicrophoneIcon, CameraIcon, CreditCardIcon, CrownIcon } from './Icons';
+import React, { RefObject } from 'react';
+import { CrownIcon, ChatIcon } from './Icons';
 
 interface PlayerBarProps {
-  isHovered: boolean;
-  isPlaying: boolean;
-  isPaid: boolean;
-  onMouseEnter: () => void;
-  onMouseLeave: () => void;
-  onPlayClick: () => void;
-  onScreenshotClick: () => void;
-  onOptionsClick: () => void;
-  onPayClick: () => void;
+  playerBarRef: RefObject<HTMLDivElement>;
   onCrownClick: () => void;
+  onChatClick: () => void;
+  isUserActionLoading: boolean;
 }
 
-export const PlayerBar = forwardRef<HTMLDivElement, PlayerBarProps>(
-  ({ 
-    isHovered, 
-    isPlaying, 
-    isPaid,
-    onMouseEnter, 
-    onMouseLeave, 
-    onPlayClick, 
-    onScreenshotClick,
-    onOptionsClick,
-    onPayClick,
-    onCrownClick
-  }, ref) => {
-    return (
-      <div
-        ref={ref}
-        onMouseEnter={onMouseEnter}
-        onMouseLeave={onMouseLeave}
-        style={styles.playerBar(isHovered)}
-        className="draggable-area"
-      > 
-        <div style={styles.controlsContainer} className="no-drag">
-          {!isPaid ? (
-            <ControlButton 
-              onClick={onPayClick} 
-              variant="payment" 
-              isPlaying={isPlaying}
-            >
-              <CreditCardIcon />
-            </ControlButton>
-          ) : (
-            <ControlButton 
-              onClick={onCrownClick} 
-              variant="options" 
-              isPlaying={isPlaying}
-            >
-              <CrownIcon />
-            </ControlButton>
-          )}
-          {/* <ControlButton 
-            onClick={onPlayClick} 
-            variant="play" 
-            isPlaying={isPlaying}
-          >
-            <MicrophoneIcon />
-          </ControlButton> */}
-          <ControlButton 
-            onClick={onScreenshotClick} 
-            variant="screenshot" 
-            isPlaying={isPlaying}
-          >
-            <CameraIcon />
-          </ControlButton>
-        </div>
-      </div>
-    );
-  }
-); 
+export const PlayerBar: React.FC<PlayerBarProps> = ({
+  playerBarRef,
+  onCrownClick,
+  onChatClick,
+  isUserActionLoading
+}) => {
+  return (
+    <div
+      ref={playerBarRef}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: '16px',
+        padding: '16px',
+        backgroundColor: 'black',
+        backdropFilter: 'blur(10px)',
+        border: '1px solid black',
+        position: 'relative',
+      }}
+      className="draggable-area"
+    >
+      <button
+        onClick={onCrownClick}
+        style={{
+          padding: '10px',
+          backgroundColor: 'rgba(255, 255, 255, 0.1)',
+          color: 'white',
+          border: 'none',
+          borderRadius: '8px',
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          width: '40px',
+          height: '40px',
+          transition: 'all 0.2s ease',
+        }}
+        className="no-drag"
+      >
+        <CrownIcon />
+      </button>
+      <button
+        onClick={onChatClick}
+        disabled={isUserActionLoading}
+        style={{
+          padding: '10px',
+          backgroundColor: isUserActionLoading ? 'rgba(255, 255, 255, 0.05)' : 'rgba(255, 255, 255, 0.1)',
+          color: 'white',
+          border: 'none',
+          borderRadius: '8px',
+          cursor: isUserActionLoading ? 'not-allowed' : 'pointer',
+          opacity: isUserActionLoading ? 0.6 : 1,
+          transition: 'all 0.2s ease',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          width: '40px',
+          height: '40px',
+        }}
+        className="no-drag"
+      >
+        <ChatIcon />
+      </button>
+    </div>
+  );
+}; 

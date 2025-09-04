@@ -18,15 +18,6 @@ export const CameraIcon: React.FC = () => (
   </svg>
 );
 
-export const CreditCardIcon: React.FC = () => (
-  <svg style={styles.icon} viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
-    <rect x="2" y="4" width="16" height="12" rx="2" ry="2" stroke="white" strokeWidth="1.5" fill="none"/>
-    <path d="M2 8H18" stroke="white" strokeWidth="1.5"/>
-    <path d="M4 12H6" stroke="white" strokeWidth="1.5" strokeLinecap="round"/>
-    <path d="M8 12H12" stroke="white" strokeWidth="1.5" strokeLinecap="round"/>
-  </svg>
-);
-
 export const DragIcon: React.FC = () => (
   <svg style={styles.icon} viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
     <path d="M10 3L7 6H9V9H6L9 12V10H11V13L14 10H12V7H15L12 4V6H10V3Z" stroke="white" strokeWidth="1.5" fill="none"/>
@@ -50,5 +41,17 @@ export const CrownIcon: React.FC = () => (
     <circle cx="10" cy="6" r="1" fill="white"/>
     <circle cx="6" cy="8" r="0.5" fill="white"/>
     <circle cx="14" cy="8" r="0.5" fill="white"/>
+  </svg>
+);
+
+export const ChatIcon: React.FC = () => (
+  <svg style={styles.icon} viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M16.5 9.5c0 2.5-2.24 5-6.5 5-.92 0-1.77-.13-2.54-.37L4 16l1.13-3.13C4.42 11.6 4 10.6 4 9.5c0-3 2.5-5.5 6.5-5.5s6.5 2.5 6.5 5.5Z" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+  </svg>
+);
+
+export const MinimizeIcon: React.FC = () => (
+  <svg style={styles.icon} viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M4 10h12" stroke="white" strokeWidth="1.5" strokeLinecap="round"/>
   </svg>
 ); 

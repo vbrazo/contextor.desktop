@@ -24,6 +24,7 @@ interface MessageCreateRequest {
   text_content?: string;
   screenshot_url?: string;
   audio_url?: string;
+  sender_type?: 'user' | 'ai';
 }
 
 interface MessageResponse {
@@ -39,8 +40,13 @@ interface MessageResponse {
       created_at: string;
       updated_at: string;
       content: string;
+      sender_type: string;
     };
   };
+}
+
+interface MessagesResponse {
+  data: MessageResponse['data'][];
 }
 
 class ApiService {
@@ -79,7 +85,20 @@ class ApiService {
 
     return response.json();
   }
+
+  async getConversationMessages(conversationId: string): Promise<MessagesResponse> {
+    const response = await fetch(`${API_BASE_URL}/conversations/${conversationId}/messages`, {
+      method: 'GET',
+      headers: this.getAuthHeaders(),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch messages: ${response.statusText}`);
+    }
+
+    return response.json();
+  }
 }
 
 export const apiService = new ApiService();
-export type { ConversationResponse, MessageResponse, MessageCreateRequest, ConversationCreateRequest }; 
+export type { ConversationResponse, MessageResponse, MessagesResponse, MessageCreateRequest, ConversationCreateRequest }; 

@@ -1,13 +1,19 @@
-import React, { useEffect, useState, useRef, MouseEvent } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import './app-drag.css';
 
-import { styles, hoverEffects } from './design-system/styles';
-
+import { styles } from './design-system/styles';
 import { InsightsPanel } from './components/InsightsPanel';
+import { AuthenticationSection } from './components/AuthenticationSection';
 import { PlayerBar } from './components/PlayerBar';
+import { LoadingBar } from './components/LoadingBar';
 import { apiService, ConversationResponse } from './services/api';
+import { PaymentModal } from './components/PaymentModal';
+import { SystemAudioService } from './services/systemAudioService';
 
-// Add JSX namespace declaration
+// ============================================================================
+// TYPE DEFINITIONS
+// ============================================================================
+
 declare global {
   namespace JSX {
     interface IntrinsicElements {
@@ -17,100 +23,213 @@ declare global {
 }
 
 declare global {
-      interface Window {
+  interface Window {
     api: {
       getMessage: () => Promise<string>;
       sendTextToMain: (text: string) => void;
       resizeWindow: (height: number) => void;
       setWindowSize: (width: number, height: number) => void;
       moveWindow: (x: number, y: number) => void;
-      onPlayStateChanged: (callback: (state: boolean) => void) => void;
-      onTranscriptionText: (callback: (text: string) => void) => void;
       onScreenshotAnalysis: (callback: (analysis: string) => void) => void;
       onScreenshotWithImage: (callback: (data: { analysis: string, imageUrl: string }) => void) => void;
+      onAudioRecordingStarted: (callback: () => void) => void;
+      onAudioRecordingError: (callback: (error: string) => void) => void;
+      onAudioAnalysis: (callback: (analysis: string) => void) => void;
+      onAudioWithAnalysis: (callback: (data: { analysis: string, audioUrl: string }) => void) => void;
       onChatResponse: (callback: (response: string) => void) => void;
       onAuthCallback: (callback: (authData: { token: string, user: any, expires_at: string }) => void) => void;
       onPaymentCallback: (callback: (paymentData: { status: string, session_id: string }) => void) => void;
       onLogout: (callback: () => void) => void;
       onGetAuthToken: (callback: () => void) => void;
       sendAuthTokenResponse: (token: string | null) => void;
-      onIdlePrompt: (callback: (data: { message: string, buttons: Array<{ id: string, text: string }> }) => void) => void;
-      sendIdleResponse: (response: string) => void;
       onHideInsightsPanel: (callback: () => void) => void;
+      onToggleInsightsPanel: (callback: (state: boolean) => void) => void;
+      onLoadingUpdate: (callback: (message: string) => void) => void;
       openChatWindow: () => void;
       closeChatWindow: () => void;
       openExternal: (url: string) => void;
+      sendAuthStateChanged: () => void;
+      createMessage: (conversationId: string, data: { content_type: string, text_content?: string, screenshot_url?: string, sender_type?: string }) => Promise<any>;
+      createScreenshotMessage: (conversationId: string, screenshotUrl: string) => Promise<any>;
+      notifyInsightsPanelOpened: () => void;
+      notifyInsightsPanelClosed: () => void;
+      // System audio recording methods
+      enableSystemAudioLoopback: () => Promise<void>;
+      disableSystemAudioLoopback: () => Promise<void>;
+      // System audio coordination
+      notifySystemAudioStarted: () => void;
+      notifySystemAudioStopped: (audioData: any) => void;
+      
+      // Enhanced audio mixing
+      startCombinedAudioRecording: () => Promise<{ success: boolean; error?: string }>;
+      stopCombinedAudioRecording: () => Promise<{ success: boolean; buffer?: Buffer; error?: string }>;
     };
     global: Window;
   }
 }
 
-type Message = {
-  sender: 'transcription';
-  text: string;
-  speaker: string;
-};
+// ============================================================================
+// CONSTANTS
+// ============================================================================
 
-type IdleButton = {
-  id: string;
-  text: string;
-};
+const CHAT_HEIGHT = 468;
+const PLAYER_BAR_HEIGHT = 70;
 
-const CHAT_HEIGHT = 500;
-const PLAYER_BAR_HEIGHT = 420;
+// ============================================================================
+// MAIN COMPONENT
+// ============================================================================
 
 const App: React.FC = () => {
-  const [message, setMessage] = useState<string>('');
-  const [isChatVisible, setIsChatVisible] = useState<boolean>(false);
-  const [isInsightsVisible, setIsInsightsVisible] = useState<boolean>(true);
-  const [isPlaying, setIsPlaying] = useState<boolean>(false);
-  const [isTranscribing, setIsTranscribing] = useState<boolean>(false);
-  const [chat, setChat] = useState<Message[]>([]);
+  // --------------------------------------------------------------------------
+  // STATE MANAGEMENT
+  // --------------------------------------------------------------------------
+  
+  // UI State
+  const [isInsightsVisible, setIsInsightsVisible] = useState<boolean>(false);
   const [insights, setInsights] = useState<string>("");
   const [isInsightsLoading, setIsInsightsLoading] = useState(false);
-  const [isHovered, setIsHovered] = useState(false);
+  const [isUserActionLoading, setIsUserActionLoading] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState<string>("");
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [messageCount, setMessageCount] = useState(0);
+  const [isMicActive, setIsMicActive] = useState(false);
+
+  const handleMicClick = async () => {
+    if (!isMicActive) {
+      // Start combined audio recording (microphone + system audio)
+      setIsMicActive(true);
+      try {
+        console.log('Starting combined audio recording...');
+        const result = await window.api.startCombinedAudioRecording();
+        
+        if (!result.success) {
+          throw new Error(result.error || 'Failed to start recording');
+        }
+        
+        console.log('Combined audio recording started successfully');
+      } catch (error) {
+        console.error('Failed to start audio recording:', error);
+        setIsMicActive(false);
+        setInsights('Failed to start audio recording. Please check your microphone and system audio permissions.');
+      }
+    } else {
+      // Stop recording
+      setIsMicActive(false);
+      try {
+        console.log('Stopping combined audio recording...');
+        const result = await window.api.stopCombinedAudioRecording();
+        
+        if (!result.success) {
+          throw new Error(result.error || 'Failed to stop recording');
+        }
+        
+        if (result.buffer) {
+          console.log('Audio recording completed, buffer size:', result.buffer.length);
+          
+          // Process the combined audio buffer
+          await processCombinedAudioBuffer(result.buffer);
+        } else {
+          console.log('No audio data recorded');
+          setInsights('No audio recorded or recording was too short. Please try again and speak for at least 0.5 seconds.');
+        }
+      } catch (error) {
+        console.error('Failed to stop audio recording:', error);
+        setInsights('Failed to stop audio recording. Please try again.');
+      }
+    }
+  };
+
+  const processCombinedAudioBuffer = async (buffer: Buffer) => {
+    try {
+      // Convert Buffer to ArrayBuffer for processing
+      const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+      
+      // For now, we'll use the existing audio processing flow
+      // The main process will handle the upload and AI analysis
+      console.log('🎤 Combined audio buffer ready for processing, size:', arrayBuffer.byteLength);
+      
+      // The main process will handle the rest of the audio processing
+      // We'll wait for the response via the existing IPC handlers
+      setLoadingMessage('');
+        
+      // The main process will send 'audio-with-analysis' message
+      // which will be handled by the existing onAudioWithAnalysis handler
+    } catch (error) {
+      console.error('Failed to process combined audio buffer:', error);
+      setInsights('Failed to process audio. Please try again.');
+      setLoadingMessage('');
+    }
+  };
+
+  // Authentication & Payment State
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [isPaid, setIsPaid] = useState<boolean>(false);
-    const [currentScreenshotUrl, setCurrentScreenshotUrl] = useState<string>('');
-  const [idlePrompt, setIdlePrompt] = useState<{ message: string, buttons: Array<{ id: string, text: string }> } | null>(null);
+
+  // Screenshot & Conversation State
+  const [currentScreenshotUrl, setCurrentScreenshotUrl] = useState<string>('');
+  const [currentAudioUrl, setCurrentAudioUrl] = useState<string>('');
   const [currentConversation, setCurrentConversation] = useState<ConversationResponse | null>(null);
-  
-  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Refs
   const playerBarRef = useRef<HTMLDivElement>(null);
   const floatingContainerRef = useRef<HTMLDivElement>(null);
 
-  // Function to logout and clear all auth data
-  const logout = () => {
-    localStorage.removeItem('auth_token');
-    localStorage.removeItem('user');
-    localStorage.removeItem('token_expires_at');
-    setIsAuthenticated(false);
-    // Clear any other auth-related state if needed
-    setInsights('');
-    setChat([]);
-    setCurrentConversation(null);
+  // System audio service
+  const systemAudioService = useRef<SystemAudioService>(new SystemAudioService());
+
+  // Add these state variables at the top of the component
+  const [lastTokenCheck, setLastTokenCheck] = useState<number>(0);
+  const TOKEN_CHECK_INTERVAL = 60000; // 1 minute
+
+  // --------------------------------------------------------------------------
+  // UTILITY FUNCTIONS
+  // --------------------------------------------------------------------------
+
+  const persistCurrentConversation = (conversation: ConversationResponse | null) => {
+    setCurrentConversation(conversation);
+    if (conversation) {
+      localStorage.setItem('current_conversation', JSON.stringify(conversation));
+    } else {
+      localStorage.removeItem('current_conversation');
+    }
   };
 
-  // Function to refresh authentication state
   const refreshAuthState = () => {
     const token = localStorage.getItem('auth_token');
     const isTokenValid = token !== null;
     
     if (!isTokenValid && isAuthenticated) {
-      // If no token but user was previously authenticated, log them out
       logout();
     } else {
       setIsAuthenticated(isTokenValid);
+      // Hide insights panel if user is not authenticated
+      if (!isTokenValid) {
+        setIsInsightsVisible(false);
+      }
+      window.api.sendAuthStateChanged();
     }
   };
 
-  // Function to refresh payment state
   const refreshPaymentState = () => {
     const paymentConfirmed = localStorage.getItem('payment_confirmed');
     setIsPaid(paymentConfirmed === 'true');
   };
 
-  // Function to create or get current conversation
+  const logout = () => {
+    localStorage.removeItem('auth_token');
+    localStorage.removeItem('user');
+    localStorage.removeItem('token_expires_at');
+    setIsAuthenticated(false);
+    setInsights('');
+    persistCurrentConversation(null);
+    setIsInsightsVisible(false);
+    window.api.sendAuthStateChanged();
+  };
+
+  // --------------------------------------------------------------------------
+  // CONVERSATION MANAGEMENT
+  // --------------------------------------------------------------------------
+
   const ensureConversation = async (): Promise<string | null> => {
     if (!isAuthenticated) {
       console.log('User not authenticated, skipping conversation creation');
@@ -121,11 +240,17 @@ const App: React.FC = () => {
       return currentConversation.data.id;
     }
 
+    const stored = localStorage.getItem('current_conversation');
+    if (stored) {
+      setCurrentConversation(JSON.parse(stored));
+      return JSON.parse(stored).data.id;
+    }
+
     try {
       const conversation = await apiService.createConversation({
-        title: `Screenshot Session ${new Date().toLocaleString()}`
+        title: `Conversation ${new Date().toLocaleString()}`
       });
-      setCurrentConversation(conversation);
+      persistCurrentConversation(conversation);
       return conversation.data.id;
     } catch (error) {
       console.error('Failed to create conversation:', error);
@@ -133,270 +258,87 @@ const App: React.FC = () => {
     }
   };
 
-  // Function to create a screenshot message
-  const createScreenshotMessage = async (screenshotUrl: string): Promise<void> => {
-    const conversationId = await ensureConversation();
-    if (!conversationId) return;
+  // const createScreenshotMessage = async (screenshotUrl: string): Promise<void> => {
+  //   const conversationId = await ensureConversation();
+  //   if (!conversationId) return;
 
-    // Only create screenshot message if we have a valid URL
-    if (!screenshotUrl || screenshotUrl.trim() === '') {
-      console.log('Skipping screenshot message creation: no URL provided');
-      return;
+  //   if (!screenshotUrl || screenshotUrl.trim() === '') {
+  //     console.log('Skipping screenshot message creation: no URL provided');
+  //     return;
+  //   }
+
+  //   try {
+  //     await window.api.createScreenshotMessage(conversationId, screenshotUrl);
+  //     console.log('Screenshot message created successfully');
+  //   } catch (error) {
+  //     console.error('Failed to create screenshot message:', error);
+  //   }
+  // };
+
+  // --------------------------------------------------------------------------
+  // EVENT HANDLERS
+  // --------------------------------------------------------------------------
+
+  const handleScreenshotClick = () => {
+    if (!isInsightsVisible) {
+      toggleInsights();
     }
-
-    try {
-      await apiService.createMessage(conversationId, {
-        content_type: 'screenshot',
-        screenshot_url: screenshotUrl
-      });
-      console.log('Screenshot message created successfully');
-    } catch (error) {
-      console.error('Failed to create screenshot message:', error);
-    }
-  };
-
-  // Function to create a text message
-  const createTextMessage = async (text: string): Promise<void> => {
-    const conversationId = await ensureConversation();
-    if (!conversationId) return;
-
-    try {
-      await apiService.createMessage(conversationId, {
-        content_type: 'text',
-        text_content: text
-      });
-      console.log('Text message created successfully');
-    } catch (error) {
-      console.error('Failed to create text message:', error);
-    }
-  };
-
-  // Effects
-  useEffect(() => {
-    const fetchMessage = async () => {
-      const response = await window.api.getMessage();
-      setMessage(response);
-    };
-    fetchMessage();
-  }, []);
-
-  useEffect(() => {
-    // Check if user is authenticated and payment status
-    const checkAuthAndPayment = () => {
-      refreshAuthState();
-      refreshPaymentState();
-    };
-    
-    checkAuthAndPayment();
-
-    // Check authentication and payment state periodically and on window focus
-    const interval = setInterval(checkAuthAndPayment, 1000); // Check every second
-    
-    const handleFocus = () => checkAuthAndPayment();
-    window.addEventListener('focus', handleFocus);
-    
-    return () => {
-      clearInterval(interval);
-      window.removeEventListener('focus', handleFocus);
-    };
-  }, []);
-
-  useEffect(() => {
-    // Ensure window is correct height on initial mount
-    window.api.resizeWindow(500);
-  }, []);
-
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [chat]);
-
-  useEffect(() => {
-    // Listen for play state changes from main process
-    window.api.onPlayStateChanged((state: boolean) => {
-      setIsPlaying(state);
-      setIsTranscribing(state);
-    });
-
-    // Listen for transcription text
-    window.api.onTranscriptionText((text: string) => {
-      if (text.trim()) {
-        const lines = text.split('\n');
-        const messages: Message[] = lines.map(line => {
-          const speakerMatch = line.match(/^(Speaker \d+):\s*(.*)/);
-          if (speakerMatch) {
-            return {
-              sender: 'transcription',
-              speaker: speakerMatch[1],
-              text: speakerMatch[2]
-            };
-          }
-          return {
-            sender: 'transcription',
-            speaker: 'You',
-            text: line
-          };
-        });
-        setChat((prevChat: Message[]) => [...prevChat, ...messages]);
-      }
-    });
-
-    // Listen for screenshot analysis
-    window.api.onScreenshotAnalysis(async (analysis: string) => {
-      if (analysis.trim()) {
-        setIsInsightsLoading(false);
-        setInsights(analysis);
-        
-        // Create conversation when we get analysis
-        // Note: We'll create the screenshot message when we get the image URL
-        await ensureConversation();
-      }
-    });
-
-    // Listen for screenshot with image
-    window.api.onScreenshotWithImage(async (data: { analysis: string, imageUrl: string }) => {
-      console.log('📸 Screenshot with image received:', data);
-      if (data.analysis.trim()) {
-        setIsInsightsLoading(false);
-        setInsights(data.analysis);
-        setCurrentScreenshotUrl(data.imageUrl);
-        console.log('📸 Screenshot URL set to:', data.imageUrl);
-        
-        // Create conversation and screenshot message
-        if (data.imageUrl) {
-          await createScreenshotMessage(data.imageUrl);
-        }
-      }
-    });
-
-    // Listen for chat responses (from general text input)
-    window.api.onChatResponse((response: string) => {
-      if (response.trim()) {
-        setIsInsightsLoading(false);
-        setInsights(response);
-      }
-    });
-
-    // Listen for authentication callback
-    window.api.onAuthCallback((authData: { token: string, user: any, expires_at: string }) => {
-      // Store auth data in localStorage
-      localStorage.setItem('auth_token', authData.token);
-      if (authData.user) {
-        localStorage.setItem('user', JSON.stringify(authData.user));
-      }
-      if (authData.expires_at) {
-        localStorage.setItem('token_expires_at', authData.expires_at);
-      }
-      
-      // Update authentication state
-      setIsAuthenticated(true);
-    });
-
-    // Listen for logout message from main process
-    window.api.onLogout(() => {
-      logout();
-    });
-
-    // Listen for auth token request from main process
-    window.api.onGetAuthToken(() => {
-      const token = localStorage.getItem('auth_token');
-      window.api.sendAuthTokenResponse(token);
-    });
-
-    // Listen for payment callback
-    window.api.onPaymentCallback((paymentData: { status: string, session_id: string }) => {
-      if (paymentData.status === 'success') {
-        // Store payment confirmation in localStorage
-        localStorage.setItem('payment_confirmed', 'true');
-        localStorage.setItem('payment_session_id', paymentData.session_id);
-        
-        // Update payment state
-        setIsPaid(true);
-      }
-    });
-
-    // Listen for idle prompt
-    window.api.onIdlePrompt((data: { message: string, buttons: Array<{ id: string, text: string }> }) => {
-      setIdlePrompt(data);
-    });
-
-    // Listen for hide insights panel
-    window.api.onHideInsightsPanel(() => {
-      setIsInsightsVisible(false);
-      setInsights(""); // Clear insights when ending conversation
-      setIdlePrompt(null); // Clear idle prompt when hiding insights
-      setCurrentConversation(null); // Clear current conversation when ending
-      if (playerBarRef.current) {
-        window.api.resizeWindow(PLAYER_BAR_HEIGHT);
-      }
-    });
-  }, [isChatVisible, isInsightsVisible]);
-
-  // Adjust window height to fit content
-  useEffect(() => {
-    if (floatingContainerRef.current) {
-      const height = floatingContainerRef.current.offsetHeight;
-      window.api.resizeWindow(height);
-    }
-  }, [insights, isInsightsVisible, isAuthenticated, isPlaying, idlePrompt]);
-
-  // Handlers
-
-  const toggleInsights = () => {
-    const newVisibility = !isInsightsVisible;
-    setIsInsightsVisible(newVisibility);
-    setIsChatVisible(false);
-    setTimeout(() => {
-      if (playerBarRef.current) {
-        window.api.resizeWindow(newVisibility ? CHAT_HEIGHT : PLAYER_BAR_HEIGHT);
-      }
-    }, 10);
-  };
-
-  const takeScreenshot = () => {
-    toggleInsights();
+    setIsUserActionLoading(true);
+    setLoadingMessage("Taking screenshot...");
     setIsInsightsLoading(true);
-    setInsights("");
-    setCurrentScreenshotUrl(''); // Clear any existing screenshot URL
     window.api.sendTextToMain('take-screenshot');
   };
 
-  const handlePlayClick = () => {
-    window.api.sendTextToMain('play');
+  const handleChatClick = () => {
+    toggleInsights();
   };
 
-  const handleScreenshotClick = () => {
-    takeScreenshot();
-  };
-
-  const handleOptionsClick = () => {
-    window.api.sendTextToMain('show-options');
+  const handlePayClick = () => {
+    window.api.openExternal('https://www.contextor.app/en/pricing');
   };
 
   const handleSendMessage = async (message: string) => {
-    // Check if this is a screenshot URL request
+    if (!isPaid && messageCount > 5) {
+      setShowPaymentModal(true);
+      return;
+    }
+
+    if (message === 'end-conversation') {
+      window.api.sendTextToMain('end-conversation');
+      persistCurrentConversation(null);
+      setIsInsightsVisible(false);
+      setInsights("");
+      setMessageCount(0);
+      setTimeout(() => {
+        window.api.resizeWindow(PLAYER_BAR_HEIGHT);
+      }, 50);
+      return;
+    }
+
+    // Show loading for user message
+    setIsUserActionLoading(true);
+    setLoadingMessage("Sending message...");
+    setIsInsightsLoading(true);
+    setMessageCount(prev => prev + 1);
+
+    // Ensure insights panel is visible before sending message
+    if (!isInsightsVisible) {
+      setIsInsightsVisible(true);
+      window.api.notifyInsightsPanelOpened();
+      // Force resize to chat height after state updates
+      setTimeout(() => {
+        window.api.resizeWindow(CHAT_HEIGHT);
+      }, 50);
+    }
+
     if (message.startsWith('screenshot-url:')) {
       const url = message.slice('screenshot-url:'.length);
-      setIsInsightsLoading(true);
       setInsights("");
-      setCurrentScreenshotUrl(''); // Clear existing screenshot URL
+      setCurrentScreenshotUrl('');
       window.api.sendTextToMain(`screenshot-url:${url}`);
-      
-      // Create a screenshot message with the provided URL
-      await createScreenshotMessage(url);
     } else {
-      // For prompt-screenshot commands, also clear the screenshot URL
-      if (!isPlaying) {
-        setCurrentScreenshotUrl(''); // Clear existing screenshot URL for new screenshot prompts
-      }
-      
-      // Create a text message for the user's input
-      await createTextMessage(message);
-      
-      window.api.sendTextToMain(
-        isPlaying 
-          ? `prompt-transcription:${message}` 
-          : `prompt-screenshot:${message}`
-      );
+      setCurrentScreenshotUrl('');
+      window.api.sendTextToMain(`prompt-screenshot:${message}`);
     }
   };
 
@@ -404,36 +346,340 @@ const App: React.FC = () => {
     window.api.openExternal('https://www.contextor.app/en/sign-in-external?electron=true');
   };
 
-  const handlePayClick = () => {
-    // Open Stripe payment flow
-    window.api.sendTextToMain('initiate-payment');
+  const handleRegisterClick = () => {
+    window.api.openExternal('https://www.contextor.app/en/sign-up-external?electron=true');
   };
 
   const handleCrownClick = () => {
-    // Open meetings page for pro members
-    window.api.openExternal('https://contextor.app/en/screenshots');
+    window.api.openExternal('https://contextor.app/en/conversations');
   };
 
-  const handleIdleResponse = (response: string) => {
-    window.api.sendIdleResponse(response);
-    setIdlePrompt(null); // Clear the prompt after responding
+  const toggleInsights = () => {
+    const newVisibility = !isInsightsVisible;
+    setIsInsightsVisible(newVisibility);
+    
+    // Notify main process about insights panel state change
+    if (newVisibility) {
+      window.api.notifyInsightsPanelOpened();
+    } else {
+      window.api.notifyInsightsPanelClosed();
+    }
+    
+    setTimeout(() => {
+      if (playerBarRef.current) {
+        window.api.resizeWindow(newVisibility ? CHAT_HEIGHT : PLAYER_BAR_HEIGHT);
+      }
+    }, 10);
   };
 
-  const messageStyle = {
-    ...styles.messageUser,
-    ...(isHovered && hoverEffects.messageHover)
-  };
+  // --------------------------------------------------------------------------
+  // EFFECTS - INITIALIZATION
+  // --------------------------------------------------------------------------
+
+  // Restore conversation from localStorage on mount
+  useEffect(() => {
+    const stored = localStorage.getItem('current_conversation');
+    if (stored) {
+      setCurrentConversation(JSON.parse(stored));
+    }
+  }, []);
+
+  // Check authentication and payment status
+  useEffect(() => {
+    const checkAuthAndPayment = () => {
+      refreshAuthState();
+      refreshPaymentState();
+    };
+    
+    checkAuthAndPayment();
+    const handleFocus = () => checkAuthAndPayment();
+    window.addEventListener('focus', handleFocus);
+    
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, []);
+
+  // Set initial window height
+  useEffect(() => {
+    window.api.resizeWindow(PLAYER_BAR_HEIGHT);
+  }, []);
+
+  // Initialize insights panel visibility based on authentication state
+  useEffect(() => {
+    const token = localStorage.getItem('auth_token');
+    const isTokenValid = token !== null;
+    
+    // Only show insights panel if user is authenticated
+    if (!isTokenValid) {
+      setIsInsightsVisible(false);
+    }
+  }, []);
+
+  // --------------------------------------------------------------------------
+  // EFFECTS - EVENT LISTENERS
+  // --------------------------------------------------------------------------
+
+  useEffect(() => {
+    console.log('🎯 Renderer process started - setting up event listeners');
+    
+    const cleanup = () => {
+      // Cleanup will be handled by the useEffect dependency array
+    };
+
+    cleanup();
+
+    // Screenshot Events
+    window.api.onScreenshotAnalysis(async (analysis: string) => {
+      // Only handle error messages from screenshot-analysis
+      if (analysis.trim() && (analysis.includes('Failed') || analysis.includes('Error'))) {
+        setIsInsightsLoading(false);
+        setIsUserActionLoading(false);
+        setLoadingMessage("");
+        setInsights(analysis);
+        // Ensure insights panel is visible when receiving analysis
+        if (!isInsightsVisible) {
+          setIsInsightsVisible(true);
+          window.api.notifyInsightsPanelOpened();
+          // Force resize to chat height after state updates
+          setTimeout(() => {
+            window.api.resizeWindow(CHAT_HEIGHT);
+          }, 50);
+        }
+      }
+    });
+
+    window.api.onScreenshotWithImage(async (data: { analysis: string, imageUrl: string }) => {
+      console.log('📸 Screenshot with image received:', data);
+      if (data.analysis.trim()) {
+        setIsInsightsLoading(false);
+        setIsUserActionLoading(false);
+        setLoadingMessage("");
+        setInsights(data.analysis);
+        setCurrentScreenshotUrl(data.imageUrl);
+        // Ensure insights panel is visible when receiving analysis with image
+        if (!isInsightsVisible) {
+          setIsInsightsVisible(true);
+          window.api.notifyInsightsPanelOpened();
+          // Force resize to chat height after state updates
+          setTimeout(() => {
+            window.api.resizeWindow(CHAT_HEIGHT);
+          }, 50);
+        }
+      }
+    });
+
+    // Audio Events
+    window.api.onAudioRecordingStarted(() => {
+      console.log('🎤 Audio recording started');
+      setIsMicActive(true);
+    });
+
+    // Test IPC communication
+    console.log('🎯 Setting up audio-with-analysis listener');
+    window.api.onAudioWithAnalysis(async (data: { analysis: string, audioUrl: string }) => {
+      console.log('🎤 Audio with analysis received in renderer:', data);
+      console.log('🎤 Audio URL:', data.audioUrl);
+      console.log('🎤 Analysis:', data.analysis);
+      if (data.analysis.trim()) {
+        setIsInsightsLoading(false);
+        setIsUserActionLoading(false);
+        setLoadingMessage("");
+        setInsights(data.analysis);
+        setCurrentAudioUrl(data.audioUrl);
+        console.log('🎤 Setting currentAudioUrl to:', data.audioUrl);
+        setIsMicActive(false);
+        // Ensure insights panel is visible when receiving analysis with audio
+        if (!isInsightsVisible) {
+          setIsInsightsVisible(true);
+          window.api.notifyInsightsPanelOpened();
+          // Force resize to chat height after state updates
+          setTimeout(() => {
+            window.api.resizeWindow(CHAT_HEIGHT);
+          }, 50);
+        }
+      }
+    });
+
+    window.api.onAudioRecordingError((error: string) => {
+      console.error('🎤 Audio recording error:', error);
+      setIsMicActive(false);
+      setInsights(error);
+    });
+
+    window.api.onAudioAnalysis(async (analysis: string) => {
+      // Only handle error messages from audio-analysis
+      if (analysis.trim() && (analysis.includes('Failed') || analysis.includes('Error'))) {
+        setIsInsightsLoading(false);
+        setIsUserActionLoading(false);
+        setLoadingMessage("");
+        setInsights(analysis);
+        setIsMicActive(false);
+        // Ensure insights panel is visible when receiving analysis
+        if (!isInsightsVisible) {
+          setIsInsightsVisible(true);
+          window.api.notifyInsightsPanelOpened();
+          // Force resize to chat height after state updates
+          setTimeout(() => {
+            window.api.resizeWindow(CHAT_HEIGHT);
+          }, 50);
+        }
+      }
+    });
+
+
+
+    // Chat Events
+    window.api.onChatResponse(async (response: string) => {
+      console.log('📝 Chat response received:', response);
+      if (response.trim()) {
+        setIsInsightsLoading(false);
+        setIsUserActionLoading(false);
+        setLoadingMessage("");
+        setInsights(response);
+
+        if (response === 'Your daily message limit has been reached. Please upgrade to continue or come back tomorrow.') {
+          setShowPaymentModal(true);
+          // Ensure loading states are cleared when showing payment modal
+          setIsInsightsLoading(false);
+          setIsUserActionLoading(false);
+          setLoadingMessage("");
+        } else if (response === 'Failed to create conversation. Please try again.') {
+          // Handle conversation creation error
+          setIsInsightsLoading(false);
+          setIsUserActionLoading(false);
+          setLoadingMessage("");
+          // Reset conversation state
+          persistCurrentConversation(null);
+          // Show error message
+          setInsights("Failed to start conversation. Please try again.");
+        } else {
+          // Always ensure insights panel is visible and window is resized
+          setIsInsightsVisible(true);
+          window.api.notifyInsightsPanelOpened();
+          // Force resize to chat height after state updates
+          setTimeout(() => {
+            window.api.resizeWindow(CHAT_HEIGHT);
+          }, 50);
+        }
+      }
+    });
+
+    // Authentication Events
+    window.api.onAuthCallback((authData: { token: string, user: any, expires_at: string }) => {
+      localStorage.setItem('auth_token', authData.token);
+      if (authData.user) {
+        localStorage.setItem('user', JSON.stringify(authData.user));
+      }
+      if (authData.expires_at) {
+        localStorage.setItem('token_expires_at', authData.expires_at);
+      }
+      setIsAuthenticated(true);
+      window.api.sendAuthStateChanged();
+    });
+
+    window.api.onLogout(() => {
+      logout();
+    });
+
+    window.api.onGetAuthToken(() => {
+      const now = Date.now();
+      if (now - lastTokenCheck < TOKEN_CHECK_INTERVAL) {
+        // If we've checked recently, just return the current token
+        const token = localStorage.getItem('auth_token');
+        window.api.sendAuthTokenResponse(token);
+        return;
+      }
+
+      // Update last check time and send token
+      setLastTokenCheck(now);
+      const token = localStorage.getItem('auth_token');
+      window.api.sendAuthTokenResponse(token);
+    });
+
+    // Payment Events
+    window.api.onPaymentCallback((paymentData: { status: string, session_id: string }) => {
+      if (paymentData.status === 'success') {
+        localStorage.setItem('payment_confirmed', 'true');
+        localStorage.setItem('payment_session_id', paymentData.session_id);
+        setIsPaid(true);
+      }
+    });
+
+    window.api.onToggleInsightsPanel((state: boolean) => {
+      setIsInsightsVisible(state);
+      // Notify main process about insights panel state change
+      if (state) {
+        window.api.notifyInsightsPanelOpened();
+      } else {
+        window.api.notifyInsightsPanelClosed();
+      }
+    });
+
+    window.api.onHideInsightsPanel(() => {
+      setIsInsightsVisible(false);
+      window.api.notifyInsightsPanelClosed();
+      persistCurrentConversation(null);
+      setInsights("");
+      setMessageCount(0);
+      setTimeout(() => {
+        window.api.resizeWindow(PLAYER_BAR_HEIGHT);
+      }, 50);
+    });
+
+    // Loading Updates
+    window.api.onLoadingUpdate((message: string) => {
+      setLoadingMessage(message);
+    });
+
+    return cleanup;
+  }, [isInsightsVisible]);
+
+  // --------------------------------------------------------------------------
+  // EFFECTS - WINDOW RESIZING
+  // --------------------------------------------------------------------------
+
+  useEffect(() => {
+    if (floatingContainerRef.current) {
+      const height = floatingContainerRef.current.offsetHeight;
+      
+      // If insights panel is not visible and no insights, show only player bar
+      if (!isInsightsVisible && !insights.trim()) {
+        window.api.resizeWindow(PLAYER_BAR_HEIGHT);
+      } else if (insights.trim()) {
+        // If there are insights, resize to content height
+        window.api.resizeWindow(height);
+      } else {
+        // Default chat height when insights panel is visible but no content yet
+        window.api.resizeWindow(CHAT_HEIGHT);
+      }
+    }
+  }, [insights, isInsightsVisible, isAuthenticated]);
+
+  // --------------------------------------------------------------------------
+  // RENDER FUNCTIONS
+  // --------------------------------------------------------------------------
+
+  // --------------------------------------------------------------------------
+  // MAIN RENDER
+  // --------------------------------------------------------------------------
 
   return (
-    <div style={styles.container} data-window-container>
+    <div style={{...styles.container}} data-window-container>
       <div
         ref={floatingContainerRef}
         style={{
           ...styles.floatingContainer,
           ...(insights.trim()
-            ? {} // default styles when insights are shown
+            ? {
+                overflow: 'hidden',
+                maxWidth: '100%',
+                wordWrap: 'break-word',
+                height: '100%',
+                maxHeight: '100vh',
+              }
             : {
-                background: 'transparent',
+                background: 'black',
                 boxShadow: 'none',
                 minHeight: 0,
                 height: 'auto',
@@ -441,161 +687,53 @@ const App: React.FC = () => {
         }}
         className="draggable-area"
       >
-          {insights.trim() && (
-            <InsightsPanel 
-              insights={insights}
-              isLoading={isInsightsLoading}
-              onSendMessage={handleSendMessage}
-              screenshotUrl={currentScreenshotUrl}
-              onScreenshotProcessed={() => {
-                console.log('📸 Screenshot processed, clearing URL');
-                setTimeout(() => setCurrentScreenshotUrl(''), 1000); // Delay clearing to ensure rendering
-              }}
-            />
-          )}
-          
-          {/* Debug display */}
-          {currentScreenshotUrl && (
-            <div style={{
-              position: 'absolute',
-              top: '10px',
-              left: '10px',
-              background: 'yellow',
-              padding: '5px',
-              fontSize: '10px',
-              maxWidth: '200px',
-              wordBreak: 'break-all',
-              zIndex: 1001,
-            }}>
-              Debug: {currentScreenshotUrl}
-            </div>
-          )}
+        <LoadingBar 
+          isLoading={isUserActionLoading}
+          message={loadingMessage}
+        />
+        {showPaymentModal && (
+          <PaymentModal
+            onClose={() => {
+              toggleInsights();
+              setShowPaymentModal(false);
+              window.api.sendTextToMain('end-conversation');
+              persistCurrentConversation(null);
+              setIsInsightsVisible(false);
+              setInsights("");
+              setMessageCount(0);
+            }}
+            onUpgrade={handlePayClick}
+          />
+        )}
 
-          {/* Idle Prompt Dialog */}
-          {idlePrompt && (
-            <div style={{
-              position: 'absolute',
-              top: 0,
-              left: 0,
-              right: 0,
-              bottom: 0,
-              backgroundColor: 'rgba(0, 0, 0, 0.7)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              zIndex: 1000,
-              backdropFilter: 'blur(5px)',
-            }}>
-              <div style={{
-                background: 'white',
-                borderRadius: '12px',
-                padding: '24px',
-                maxWidth: '300px',
-                textAlign: 'center',
-                boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)',
-              }}>
-                <p style={{
-                  margin: '0 0 20px 0',
-                  fontSize: '16px',
-                  color: '#333',
-                  lineHeight: '1.4',
-                }}>
-                  {idlePrompt.message}
-                </p>
-                <div style={{
-                  display: 'flex',
-                  gap: '12px',
-                  justifyContent: 'center',
-                }}>
-                  {idlePrompt.buttons.map((button: IdleButton) => (
-                    <button
-                      key={button.id}
-                      onClick={() => handleIdleResponse(button.id)}
-                      style={{
-                        padding: '10px 20px',
-                        borderRadius: '8px',
-                        border: 'none',
-                        backgroundColor: button.id === 'yes' ? '#FF3B30' : '#007AFF',
-                        color: 'white',
-                        fontSize: '14px',
-                        fontWeight: '500',
-                        cursor: 'pointer',
-                        transition: 'all 0.2s ease',
-                      }}
-                      onMouseEnter={(e: MouseEvent<HTMLButtonElement>) => {
-                        e.currentTarget.style.opacity = '0.8';
-                      }}
-                      onMouseLeave={(e: MouseEvent<HTMLButtonElement>) => {
-                        e.currentTarget.style.opacity = '1';
-                      }}
-                    >
-                      {button.text}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-        {/* )} */}
-
-        
         {!isAuthenticated ? (
-          <div style={{
-            background: 'rgba(0, 0, 0, 0.8)',
-            borderRadius: '12px',
-            padding: '16px',
-            margin: '8px',
-            textAlign: 'center',
-            color: 'white',
-            backdropFilter: 'blur(10px)',
-            border: '1px solid rgba(255, 255, 255, 0.1)'
-          }}>
-            <p style={{ 
-              margin: '0 0 12px 0', 
-              fontSize: '14px',
-              color: 'rgba(255, 255, 255, 0.8)'
-            }}>
-              Sign in to access all features
-            </p>
-            <button
-              onClick={handleLoginClick}
-              style={{
-                background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-                border: 'none',
-                borderRadius: '8px',
-                padding: '8px 16px',
-                color: 'white',
-                fontWeight: '500',
-                fontSize: '14px',
-                cursor: 'pointer',
-                transition: 'all 0.2s ease',
-                boxShadow: '0 2px 8px rgba(0, 0, 0, 0.2)'
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.transform = 'translateY(-1px)';
-                e.currentTarget.style.boxShadow = '0 4px 12px rgba(0, 0, 0, 0.3)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.transform = 'translateY(0)';
-                e.currentTarget.style.boxShadow = '0 2px 8px rgba(0, 0, 0, 0.2)';
-              }}
-            >
-              Login
-            </button>
-          </div>
+          <AuthenticationSection
+            onLoginClick={handleLoginClick}
+            onRegisterClick={handleRegisterClick}
+          />
         ) : (
           <PlayerBar
-            ref={playerBarRef}
-            isHovered={isHovered}
-            isPlaying={isPlaying}
-            isPaid={isPaid}
-            onMouseEnter={() => setIsHovered(true)}
-            onMouseLeave={() => setIsHovered(false)}
-            onPlayClick={handlePlayClick}
-            onScreenshotClick={handleScreenshotClick}
-            onOptionsClick={handleOptionsClick}
-            onPayClick={handlePayClick}
+            playerBarRef={playerBarRef}
             onCrownClick={handleCrownClick}
+            onChatClick={handleChatClick}
+            isUserActionLoading={isUserActionLoading}
+          />
+        )}
+
+        {(currentConversation || insights.trim() || isInsightsVisible) && (
+          <InsightsPanel 
+            insights={insights}
+            isLoading={isInsightsLoading}
+            onSendMessage={handleSendMessage}
+            screenshotUrl={currentScreenshotUrl}
+            audioUrl={currentAudioUrl}
+            onScreenshotProcessed={() => setCurrentScreenshotUrl('')}
+            onAudioProcessed={() => setCurrentAudioUrl('')}
+            handleScreenshotClick={handleScreenshotClick}
+            isUserActionLoading={isUserActionLoading}
+            handleMicClick={handleMicClick}
+            isMicActive={isMicActive}
+            conversationId={currentConversation?.data.id}
           />
         )}
       </div>

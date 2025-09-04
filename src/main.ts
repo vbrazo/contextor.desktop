@@ -1,235 +1,764 @@
 import * as dotenv from 'dotenv';
 dotenv.config();
 
-import { app, BrowserWindow, ipcMain, globalShortcut, Tray, Menu, desktopCapturer, screen, nativeImage, Notification, shell } from 'electron';
-import * as path from 'path';
-import * as isDev from 'electron-is-dev';
-import * as fs from 'fs';
-import { exec } from 'child_process';
-import { stop as stopRecording } from 'node-record-lpcm16';
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import OpenAI from 'openai';
-import axios from 'axios';
-import { INTERVIEW_ASSISTANT_PROMPT, WHISPER_TRANSCRIPTION_PROMPT } from './prompts';
-import { uploadScreenshotToS3, uploadAudioToS3 } from './s3Service';
+import { app, globalShortcut, ipcMain, shell } from 'electron';
 
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY!);
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY }); // Keep for Whisper transcription
+import { WindowManager } from './helpers/windowManager';
+import { TrayManager } from './helpers/trayManager';
+import { ScreenshotService } from './helpers/screenshotService';
+import { AudioService } from './helpers/audioService';
+import { audioScreenshotService } from 'electron-audio-shot';
+import { APIService } from './helpers/apiService';
 
-let mainWindow: BrowserWindow | null = null;
-let tray: Tray | null = null;
-let isPlaying = false;
-let recordingProcess: any = null;
-let transcriptionStream: any = null;
-let recordingStream: any = null;
-let lastRecordingPath: string | null = null;
-let chatWindow: BrowserWindow | null = null;
-let lastAIResponse: string | null = null;
-let lastActivityTime: number = Date.now();
-let idleCheckInterval: NodeJS.Timeout | null = null;
-let isIdlePromptShown: boolean = false;
+// ============================================================================
+// MAIN APPLICATION
+// ============================================================================
 
-function createTrayIcon() {
-  try {
-    // Use a built-in icon for now
-    const iconPath = path.join(__dirname, '../public/icon.iconset/icon_16x16@2x.png');
+class ContextorApp {
+  public windowManager: WindowManager;
+  private trayManager: TrayManager;
+  private screenshotService: ScreenshotService;
+  private audioService: AudioService;
+  private platformAudioService: audioScreenshotService;
+  private apiService: APIService;
+  private lastAIResponse: string | null = null;
+  private currentAuthToken: string | null = null;
+  private currentConversationId: string | null = null;
+  private isFetchingToken: boolean = false;
+  private tokenPromise: Promise<string | null> | null = null;
+  private lastTokenCheck: number = 0;
+  private readonly TOKEN_CHECK_INTERVAL = 3000; // 3 second
+
+  constructor() {
+    this.windowManager = new WindowManager();
+    this.trayManager = new TrayManager(this.windowManager);
+    this.screenshotService = new ScreenshotService();
+    this.audioService = new AudioService();
+    this.platformAudioService = new audioScreenshotService();
+    this.apiService = new APIService();
     
-    // Create a simple icon if it doesn't exist
-    if (!fs.existsSync(iconPath)) {
-      const iconBuffer = Buffer.from(`
-        <svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
-          <circle cx="16" cy="16" r="14" fill="#FF2D55"/>
-          <path d="M16 8v16M8 16h16" stroke="white" stroke-width="2" stroke-linecap="round"/>
-        </svg>
-      `);
-      fs.writeFileSync(iconPath, iconBuffer);
-    }
-
-    tray = new Tray(iconPath);
-    tray.setToolTip('Contextor');
-
-    let isInvisible = false;
-
-    function updateTrayMenu() {
-      const isVisible = mainWindow?.isVisible();
-      const showHideLabel = isVisible ? 'Hide App' : 'Show App';
-      const invisibleLabel = isInvisible ? 'Make Visible' : 'Make Invisible';
-      const contextMenu = Menu.buildFromTemplate([
-        {
-          label: showHideLabel,
-          click: () => {
-            if (mainWindow) {
-              if (mainWindow.isVisible()) {
-                mainWindow.hide();
-              } else {
-                mainWindow.show();
-                mainWindow.focus();
-              }
-              setTimeout(updateTrayMenu, 100);
-            }
-          }
-        },
-        {
-          label: invisibleLabel,
-          click: () => {
-            if (mainWindow) {
-              isInvisible = !isInvisible;
-              if (isInvisible) {
-                mainWindow.setOpacity(0.5);
-                mainWindow.setSkipTaskbar(true);
-                mainWindow.blur();
-                new Notification({ title: 'Contextor', body: 'App is now invisible. Use the tray menu to make it visible again.' }).show();
-              } else {
-                mainWindow.setOpacity(1);
-                mainWindow.setIgnoreMouseEvents(false);
-                mainWindow.setSkipTaskbar(false);
-                mainWindow.show();
-                mainWindow.focus();
-              }
-              setTimeout(updateTrayMenu, 100);
-            }
-          }
-        },
-        {
-          label: 'Logout',
-          click: () => {
-            // Send logout message to renderer process
-            if (mainWindow) {
-              mainWindow.webContents.send('logout');
-            }
-          }
-        },
-        {
-          label: 'Quit',
-          click: () => {
-            app.quit();
-          }
-        }
-      ]);
-      tray?.setContextMenu(contextMenu);
-    }
-
-    updateTrayMenu();
-
-    // Remove tray click handler (do nothing on click)
-    tray.on('click', () => {});
-
-    // Also update menu when window is shown/hidden
-    mainWindow?.on('show', updateTrayMenu);
-    mainWindow?.on('hide', updateTrayMenu);
-
-    console.log('Tray icon created successfully');
-  } catch (error) {
-    console.error('Failed to create tray icon:', error);
-  }
-}
-
-function createWindow() {
-  // Get the primary display's work area
-  const primaryDisplay = screen.getPrimaryDisplay();
-  const { width: screenWidth, height: screenHeight } = primaryDisplay.workAreaSize;
-
-  mainWindow = new BrowserWindow({
-    width: 200,
-    height: 100,
-    frame: false,
-    transparent: true,
-    alwaysOnTop: true,
-    movable: true,
-    resizable: true,
-    x: Math.floor(screenWidth - 400 - 100), // Position 100px from the right edge
-    y: 80, // Position at the top with some margin
-    title: 'Contextor',
-    backgroundColor: '#000000', // Add background color
-    show: false, // Don't show until ready
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js'),
-    },
-  });
-
-  // Set the window title
-  mainWindow.setTitle('Contextor');
-
-  // In development mode, load from the dev server
-  if (isDev) {
-    mainWindow.loadURL('http://localhost:8080');
-  } else {
-    // In production, load from the built files
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+    // Reset conversation ID on app startup
+    this.currentConversationId = null;
+    console.log('🚀 App starting - conversation ID reset');
   }
 
-  // Show window when ready
-  mainWindow.once('ready-to-show', () => {
-    if (mainWindow) {
-      mainWindow.show();
-      mainWindow.focus();
-      console.log('Window shown and focused');
-    }
-  });
+  // --------------------------------------------------------------------------
+  // APP LIFECYCLE
+  // --------------------------------------------------------------------------
 
-  // Send stored auth callback data if available (Windows/Linux)
-  mainWindow.webContents.once('did-finish-load', () => {
-    if ((global as any).authCallback && mainWindow) {
-      mainWindow.webContents.send('auth-callback', (global as any).authCallback);
-      delete (global as any).authCallback;
-    }
-    
-    if ((global as any).paymentCallback && mainWindow) {
-      mainWindow.webContents.send('payment-callback', (global as any).paymentCallback);
-      delete (global as any).paymentCallback;
-    }
-  });
-
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
-
-  // Create tray icon
-  createTrayIcon();
-
-  // Start idle timer for monitoring conversation activity
-  startIdleTimer();
-
-  if (process.platform === 'darwin') {
-    const iconPath = path.join(__dirname, '../public/apple-touch-icon.png');
-    const image = nativeImage.createFromPath(iconPath);
-    if (!image.isEmpty()) {
-      app.dock?.setIcon(image);
-    } else {
-      console.warn('Failed to load Dock icon:', iconPath);
-    }
+  async initialize(): Promise<void> {
+    this.setupApp();
+    this.createWindow();
+    this.setupGlobalShortcuts();
+    this.setupIpcHandlers();
+    this.platformAudioService.setupIpcHandlers();
+    this.handleCommandLineArgs();
   }
-}
 
-app.whenReady().then(() => {
-  // Set the app name
+  // --------------------------------------------------------------------------
+  // PRIVATE METHODS
+  // --------------------------------------------------------------------------
+
+  private setupApp(): void {
   if (process.platform === 'darwin') {
     app.setName('Contextor');
   }
 
-  // Register protocol for auth callback
   app.setAsDefaultProtocolClient('contextor-auth');
-  
-  // Register protocol for payment callback
   app.setAsDefaultProtocolClient('contextor-payment');
+  }
 
-  createWindow();
+  public createWindow(): void {
+    this.windowManager.createMainWindow();
+    this.trayManager.createTray();
+  }
 
-  // Register global shortcut
+  private setupGlobalShortcuts(): void {
   const shortcut = process.platform === 'darwin' ? 'CommandOrControl+Shift+K' : 'Control+Shift+K';
   globalShortcut.register(shortcut, () => {
-    if (!mainWindow) {
-      createWindow();
+      if (!this.windowManager.window) {
+        this.createWindow();
     } else {
-      if (mainWindow.isMinimized()) {
-        mainWindow.restore();
+        this.windowManager.restore();
+        this.windowManager.show();
       }
-      mainWindow.show();
-      mainWindow.focus();
+    });
+  }
+
+  private setupIpcHandlers(): void {
+    // Basic handlers
+    ipcMain.handle('get-message', async () => {
+      return 'Hello from the main process!';
+    });
+
+    // Text processing
+    ipcMain.on('send-text-to-main', async (event, text: string) => {
+      await this.handleTextMessage(text);
+    });
+
+    // Window management
+    ipcMain.on('resize-window', (event, height: number) => {
+      this.windowManager.resize(undefined, height);
+    });
+
+    ipcMain.on('set-window-size', (event, width: number, height: number) => {
+      this.windowManager.resize(width, height);
+    });
+
+    // External links
+    ipcMain.on('open-external', (event, url: string) => {
+      shell.openExternal(url);
+    });
+
+    // API handlers
+    ipcMain.handle('create-message', async (event, conversationId: string, data: { content_type: string, text_content?: string, screenshot_url?: string, sender_type?: string }) => {
+      return await this.handleCreateMessage(conversationId, data);
+    });
+
+    // System audio coordination handlers
+    ipcMain.on('system-audio-started', () => {
+      console.log('System audio recording started in renderer');
+    });
+
+    ipcMain.on('system-audio-stopped', (event, audioData: any) => {
+      console.log('System audio recording stopped in renderer:', audioData);
+      // Here you could potentially combine system audio with microphone audio
+    });
+
+    // Enhanced audio mixing handlers
+    ipcMain.handle('start-combined-audio-recording', async () => {
+      try {
+        console.log('🎤 Main process: Starting combined audio recording...');
+        
+        // Check permissions before starting
+        await this.checkAudioPermissions();
+        
+        await this.audioService.startRecording();
+        console.log('✅ Main process: Combined audio recording started successfully');
+        return { success: true };
+      } catch (error) {
+        console.error('❌ Main process: Failed to start combined audio recording:', error);
+        console.error('Error details:', {
+          name: error instanceof Error ? error.name : 'Unknown',
+          message: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined
+        });
+        return { success: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    });
+
+    ipcMain.handle('stop-combined-audio-recording', async () => {
+      try {
+        const buffer = await this.audioService.stopRecording();
+        
+        if (buffer) {
+          // Process the combined audio buffer
+          await this.processCombinedAudioBuffer(buffer);
+        }
+        
+        return { success: true, buffer };
+      } catch (error) {
+        console.error('Failed to stop combined audio recording:', error);
+        return { success: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    });
+
+    // Audio configuration handlers
+    ipcMain.handle('set-audio-configuration', async (event, config: { systemAudioEnabled?: boolean; echoCancellationEnabled?: boolean; echoCancellationSensitivity?: 'low' | 'medium' | 'high'; audioScenario?: 'auto' | 'earphones' | 'speakers'; voiceRecordingMode?: 'headphones' | 'speakers' | 'auto' }) => {
+      try {
+        if (config.systemAudioEnabled !== undefined) {
+          this.audioService.setSystemAudioRecording(config.systemAudioEnabled);
+        }
+        if (config.echoCancellationEnabled !== undefined) {
+          this.audioService.setEchoCancellation(config.echoCancellationEnabled);
+        }
+        if (config.echoCancellationSensitivity !== undefined) {
+          this.audioService.setEchoCancellationSensitivity(config.echoCancellationSensitivity);
+        }
+        if (config.audioScenario !== undefined) {
+          this.audioService.setAudioScenario(config.audioScenario);
+        }
+        if (config.voiceRecordingMode !== undefined) {
+          this.audioService.setVoiceRecordingMode(config.voiceRecordingMode);
+        }
+        return { success: true };
+      } catch (error) {
+        console.error('Failed to set audio configuration:', error);
+        return { success: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    });
+
+    ipcMain.handle('get-audio-configuration', async () => {
+      try {
+        return { success: true, config: this.audioService.getConfiguration() };
+      } catch (error) {
+        console.error('Failed to get audio configuration:', error);
+        return { success: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    });
+
+    // Auth token handler
+    ipcMain.on('auth-token-response', (event, token: string | null) => {
+      this.handleAuthTokenResponse(token);
+    });
+
+    ipcMain.on('auth-state-changed', () => {
+      // Clear token state when auth state changes
+      this.clearTokenState();
+      console.log('Auth state changed - token state cleared');
+    });
+
+    // Logout handler
+    ipcMain.on('logout', () => {
+      this.clearTokenState();
+      console.log('Logout triggered - token state cleared');
+    });
+  }
+
+  private async handleTextMessage(text: string): Promise<void> {
+    if (text === 'end-conversation') {
+      this.processEndConversation();
+      return;
     }
-  });
+
+    if (text === 'take-screenshot') {
+      await this.processScreenshotCommand();
+      return;
+    }
+
+    if (text === 'start-audio-recording') {
+      await this.processAudioCommand();
+      return;
+    }
+
+    if (text === 'stop-audio-recording') {
+      await this.processAudioStopCommand();
+      return;
+    }
+
+    await this.processGeneralTextInput(text);
+  }
+
+  private async processGeneralTextInput(userText: string): Promise<void> {
+    try {
+      const token = await this.getAuthToken();
+      if (!token) {
+        this.windowManager.sendMessage('chat-response', 'Please log in to use AI features.');
+        return;
+      }
+
+      // Get or create conversation
+      const conversationId = await this.getOrCreateConversation(token);
+      if (!conversationId) {
+        this.windowManager.sendMessage('chat-response', 'Failed to create conversation. Please try again.');
+        return;
+      }
+
+      this.windowManager.sendMessage('loading-update', 'Processing with AI...');
+      
+      // Process message with AI via backend
+      const result = await this.apiService.processMessageWithAI(token, conversationId, {
+        content_type: 'text',
+        text_content: userText,
+        sender_type: 'user'
+      });
+
+      const aiResponse = result.ai_response.data.attributes.text_content || 'No response received';
+      this.lastAIResponse = aiResponse;
+
+      this.windowManager.sendMessage('chat-response', aiResponse);
+
+      console.log('Processed general text input:', userText);
+      console.log('AI response:', aiResponse);
+    } catch (error) {
+      console.error('Failed to process general text input:', error);
+      if (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (errorMessage.includes('402')) {
+          this.windowManager.sendMessage('toggle-insights-panel', true);
+          this.windowManager.sendMessage('chat-response', 'Your daily message limit has been reached. Please upgrade to continue or come back tomorrow.');
+        } else {
+          this.windowManager.sendMessage('chat-response', 'Failed to process your message. Please try again.');
+        }
+      }
+    }
+  }
+
+  private async processScreenshotCommand(): Promise<void> {
+    const window = this.windowManager.window;
+    if (!window) return;
+
+    const token = await this.getAuthToken();
+    if (!token) {
+      this.windowManager.sendMessage('screenshot-analysis', 'Please log in to use AI features.');
+      return;
+    }
+
+    // Get or create conversation
+    const conversationId = await this.getOrCreateConversation(token);
+    if (!conversationId) {
+      this.windowManager.sendMessage('screenshot-analysis', 'Failed to create conversation. Please try again.');
+      return;
+    }
+
+    this.windowManager.sendMessage('loading-update', 'Capturing screen...');
+    const screenshotResult = await this.screenshotService.takeScreenshot(window, token, conversationId);
+    
+    if (screenshotResult) {
+      try {
+        this.windowManager.sendMessage('loading-update', 'Analyzing with AI...');
+        
+        // Get the screenshot URL from the original upload response
+        const screenshotUrl = screenshotResult.screenshotUrl;
+        
+        // Get AI analysis for the screenshot (this creates the AI response message)
+        const aiAnalysis = await this.getScreenshotAnalysis(screenshotUrl, conversationId, screenshotResult.messageId);
+        
+        this.lastAIResponse = aiAnalysis;
+        
+        this.windowManager.sendMessage('screenshot-with-image', {
+          analysis: aiAnalysis,
+          imageUrl: screenshotUrl
+        });
+
+          console.log('Screenshot analysis:', aiAnalysis);
+        } catch (error) {
+          console.error('Failed to analyze screenshot:', error);
+          if (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            if (errorMessage.includes('402')) {
+              this.windowManager.sendMessage('toggle-insights-panel', true);
+              this.windowManager.sendMessage('chat-response', 'Your daily message limit has been reached. Please upgrade to continue or come back tomorrow.');
+            } else {
+              this.windowManager.sendMessage('chat-response', 'Failed to process your message. Please try again.');
+            }
+          }
+        }
+    } else {
+      this.windowManager.sendMessage('screenshot-analysis', 'Failed to create screenshot');
+    }
+  }
+
+  private async processAudioCommand(): Promise<void> {
+    try {
+      console.log('Starting audio recording...');
+      await this.audioService.startRecording();
+      this.windowManager.sendMessage('audio-recording-started');
+      console.log('Audio recording started successfully');
+    } catch (error) {
+      console.error('Failed to start audio recording:', error);
+      this.windowManager.sendMessage('audio-recording-error', 'Failed to start audio recording');
+    }
+  }
+
+  private async processAudioStopCommand(): Promise<void> {
+    const window = this.windowManager.window;
+    if (!window) return;
+
+    const token = await this.getAuthToken();
+    if (!token) {
+      this.windowManager.sendMessage('audio-analysis', 'Please log in to use AI features.');
+      return;
+    }
+
+    // Get or create conversation
+    const conversationId = await this.getOrCreateConversation(token);
+    if (!conversationId) {
+      this.windowManager.sendMessage('audio-analysis', 'Failed to create conversation. Please try again.');
+      return;
+    }
+
+    try {
+      console.log('Stopping audio recording...');
+      const audioBuffer = await this.audioService.stopRecording();
+      
+      if (!audioBuffer) {
+        this.windowManager.sendMessage('audio-analysis', 'No audio recorded or recording was too short. Please try again and speak for at least 0.5 seconds.');
+        return;
+      }
+
+      if (audioBuffer.length === 0) {
+        this.windowManager.sendMessage('audio-analysis', 'No audio data captured. Please check your microphone permissions and try again.');
+        return;
+      }
+
+      console.log(`Audio buffer size: ${audioBuffer.length} bytes`);
+      this.windowManager.sendMessage('loading-update', 'Processing audio...');
+      
+      // Upload audio buffer to S3
+      const audioResult = await this.audioService.uploadAudioBuffer(audioBuffer, token, conversationId);
+      
+      if (audioResult) {
+        this.windowManager.sendMessage('loading-update', 'Analyzing with AI...');
+        
+        // Get AI analysis for the audio (this creates the AI response message)
+        const aiAnalysis = await this.getAudioAnalysis(audioResult.audioUrl, conversationId, audioResult.messageId);
+        
+        this.lastAIResponse = aiAnalysis;
+        
+        console.log('🎤 Sending audio-with-analysis message to renderer:', {
+          analysis: aiAnalysis,
+          audioUrl: audioResult.audioUrl
+        });
+        
+        this.windowManager.sendMessage('audio-with-analysis', {
+          analysis: aiAnalysis,
+          audioUrl: audioResult.audioUrl
+        });
+
+        console.log('Audio analysis:', aiAnalysis);
+      } else {
+        this.windowManager.sendMessage('audio-analysis', 'Failed to upload or process audio. Please try again.');
+      }
+    } catch (error) {
+      console.error('Failed to process audio:', error);
+      if (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (errorMessage.includes('402')) {
+          this.windowManager.sendMessage('toggle-insights-panel', true);
+          this.windowManager.sendMessage('chat-response', 'Your daily message limit has been reached. Please upgrade to continue or come back tomorrow.');
+        } else if (errorMessage.includes('permission') || errorMessage.includes('microphone')) {
+          this.windowManager.sendMessage('audio-analysis', 'Microphone permission denied. Please check your system settings and try again.');
+        } else if (errorMessage.includes('network') || errorMessage.includes('fetch')) {
+          this.windowManager.sendMessage('audio-analysis', 'Network error. Please check your internet connection and try again.');
+        } else {
+          this.windowManager.sendMessage('audio-analysis', `Audio processing failed: ${errorMessage}`);
+        }
+      }
+    }
+  }
+
+  private processEndConversation(): void {
+    this.windowManager.sendMessage('hide-insights-panel');
+    console.log('End conversation command received - hiding insights panel');
+    
+    // Reset conversation ID so next interaction creates a new conversation
+    this.currentConversationId = null;
+    console.log('🔄 Conversation reset - next interaction will create new conversation');
+  }
+
+  private async handleCreateMessage(conversationId: string, data: { content_type: string, text_content?: string, screenshot_url?: string, sender_type?: string }): Promise<any> {
+    try {
+      const token = await this.getAuthToken();
+      if (!token) {
+        throw new Error('No authentication token available');
+      }
+      
+      // Ensure content_type is properly typed
+      const messageData = {
+        ...data,
+        content_type: data.content_type as 'text' | 'screenshot' | 'audio',
+        sender_type: data.sender_type as 'user' | 'ai' | undefined
+      };
+      
+      const result = await this.apiService.createMessage(token, conversationId, messageData);
+      console.log('Message created successfully:', result);
+      return result;
+  } catch (error) {
+      console.error('Failed to create message:', error);
+      throw error;
+    }
+  }
+
+  private async handleAuthTokenResponse(token: string | null): Promise<void> {
+    this.currentAuthToken = token;
+    console.log('Auth token received:', token ? 'Token available' : 'No token');
+    if (token) {
+      // Only fetch user data if we haven't already
+      if (!this.isFetchingToken) {
+        await this.handleReturnCurrentUser(token);
+      }
+    }
+  }
+
+  private async handleReturnCurrentUser(token: string): Promise<void> {
+    try {
+      this.isFetchingToken = true;
+      const user = await this.apiService.returnCurrentUser(token);
+      console.log('User:', user);
+          } catch (error) {
+        console.error('Failed to get current user:', error);
+        this.windowManager.sendMessage('logout');
+        console.log('User unauthorized - triggering logout to show login page');
+      } finally {
+      this.isFetchingToken = false;
+    }
+  }
+
+  private async getAuthToken(): Promise<string | null> {
+    const now = Date.now();
+    
+    // If we have a token and haven't checked recently, return it
+    if (this.currentAuthToken && (now - this.lastTokenCheck) < this.TOKEN_CHECK_INTERVAL) {
+      return this.currentAuthToken;
+    }
+
+    // If we're already fetching a token, return the existing promise
+    if (this.tokenPromise) {
+      return this.tokenPromise;
+    }
+
+    // Create a new promise for token fetching
+    this.tokenPromise = new Promise((resolve) => {
+      this.lastTokenCheck = now;
+      
+      // Request token from renderer
+      this.windowManager.sendMessage('get-auth-token');
+      
+      // Set a timeout to resolve with current token if no response
+      setTimeout(() => {
+        this.tokenPromise = null;
+        resolve(this.currentAuthToken);
+      }, 1000);
+    });
+
+    return this.tokenPromise;
+  }
+
+  private async getOrCreateConversation(token: string): Promise<string | null> {
+    try {
+      // If we already have a conversation ID for this session, reuse it
+      if (this.currentConversationId) {
+        console.log('📝 Using existing conversation:', this.currentConversationId);
+        return this.currentConversationId;
+      }
+
+      // Create a new conversation (only happens on app start or after "end conversation")
+      const conversation = await this.apiService.createConversation(token, {
+        title: `Interview - ${new Date().toLocaleString()}`
+      });
+
+      this.currentConversationId = conversation.data.id;
+      console.log('✅ New conversation created:', this.currentConversationId);
+      
+      return this.currentConversationId;
+    } catch (error) {
+      console.error('Failed to create conversation:', error);
+      if (error instanceof Error && error.message.includes('402')) {
+        this.windowManager.sendMessage('toggle-insights-panel', true);
+        this.windowManager.sendMessage('chat-response', 'Your daily message limit has been reached. Please upgrade to continue or come back tomorrow.');
+      }
+      return null;
+    }
+  }
+
+  private handleCommandLineArgs(): void {
+    if (process.platform === 'win32' || process.platform === 'linux') {
+      const authUrl = process.argv.find(arg => arg.startsWith('contextor-auth://'));
+      const paymentUrl = process.argv.find(arg => arg.startsWith('contextor-payment://'));
+
+      if (authUrl) {
+        this.handleAuthProtocol(authUrl);
+      }
+
+      if (paymentUrl) {
+        this.handlePaymentProtocol(paymentUrl);
+      }
+    }
+  }
+
+  public handleAuthProtocol(url: string): void {
+    const urlObj = new URL(url);
+    const token = urlObj.searchParams.get('token');
+    const user = urlObj.searchParams.get('user');
+    const expiresAt = urlObj.searchParams.get('expires_at');
+    
+    if (token) {
+      const authData = {
+        token,
+        user: user ? JSON.parse(decodeURIComponent(user)) : null,
+        expires_at: expiresAt || ''
+      };
+
+      if (this.windowManager.window) {
+        this.windowManager.sendMessage('auth-callback', authData);
+      } else {
+        (global as any).authCallback = authData;
+      }
+    }
+  }
+
+  public handlePaymentProtocol(url: string): void {
+    const urlObj = new URL(url);
+    const success = urlObj.searchParams.get('success');
+    const sessionId = urlObj.searchParams.get('session_id');
+    
+    if (success === 'true') {
+      const paymentData = {
+        status: 'success',
+        session_id: sessionId || ''
+      };
+
+      if (this.windowManager.window) {
+        this.windowManager.sendMessage('payment-callback', paymentData);
+      } else {
+        (global as any).paymentCallback = paymentData;
+      }
+    }
+  }
+
+  // Add a method to clear token state
+  private clearTokenState(): void {
+    this.currentAuthToken = null;
+    this.tokenPromise = null;
+    this.isFetchingToken = false;
+    this.lastTokenCheck = 0;
+  }
+
+  // Get AI analysis for a screenshot
+  private async getScreenshotAnalysis(screenshotUrl: string, conversationId: string, messageId: string): Promise<string> {
+    try {
+      // Use the existing message ID instead of creating a new message
+      const response = await this.apiService.processExistingMessageWithAI(this.currentAuthToken!, conversationId, messageId);
+      return response.ai_response.data.attributes.text_content || 'No analysis available';
+    } catch (error) {
+      console.error('Failed to get screenshot analysis:', error);
+      return 'Failed to analyze screenshot. Please try again.';
+    }
+  }
+
+  // Get AI analysis for audio
+  private async getAudioAnalysis(audioUrl: string, conversationId: string, messageId: string): Promise<string> {
+    try {
+      // Use the existing message ID instead of creating a new message
+      const response = await this.apiService.processExistingMessageWithAI(this.currentAuthToken!, conversationId, messageId);
+      return response.ai_response.data.attributes.text_content || 'No analysis available';
+    } catch (error) {
+      console.error('Failed to get audio analysis:', error);
+      return 'Failed to analyze audio. Please try again.';
+    }
+  }
+
+  // Check audio permissions and system requirements
+  private async checkAudioPermissions(): Promise<void> {
+    try {
+      console.log('🔍 Checking audio permissions and system requirements...');
+      
+      // Check if we're on macOS and provide specific guidance
+      if (process.platform === 'darwin') {
+        console.log('🍎 macOS detected - checking for common permission issues...');
+        
+        // Check if the app has microphone permissions
+        const { exec } = require('child_process');
+        const { promisify } = require('util');
+        const execAsync = promisify(exec);
+        
+        try {
+          // This command checks if the app has microphone access
+          await execAsync('tccutil query Microphone');
+          console.log('✅ Microphone permissions check passed');
+        } catch (error) {
+          console.warn('⚠️ Microphone permissions may need to be granted manually');
+          console.warn('Please check System Preferences > Privacy & Security > Microphone');
+        }
+      }
+      
+      // Check for required dependencies
+      const { spawn } = require('child_process');
+      
+      // Check sox
+      const soxTest = spawn('sox', ['--version']);
+      await new Promise<void>((resolve, reject) => {
+        soxTest.on('error', () => {
+          console.error('❌ Sox not found - audio recording will fail');
+          reject(new Error('Sox audio tool not found. Please install sox: brew install sox (macOS) or apt-get install sox (Linux)'));
+        });
+        soxTest.on('close', (code: number) => {
+          if (code === 0) {
+            console.log('✅ Sox is available');
+            resolve();
+          } else {
+            console.error('❌ Sox test failed');
+            reject(new Error('Sox audio tool test failed'));
+          }
+        });
+      });
+      
+      console.log('✅ Audio permissions and requirements check completed');
+    } catch (error) {
+      console.error('❌ Audio permissions check failed:', error);
+      throw error;
+    }
+  }
+
+  // Process combined audio buffer (microphone + system audio)
+  private async processCombinedAudioBuffer(buffer: Buffer): Promise<void> {
+    try {
+      const token = await this.getAuthToken();
+      if (!token) {
+        this.windowManager.sendMessage('chat-response', 'Please log in to use AI features.');
+        return;
+      }
+
+      // Get or create conversation
+      const conversationId = await this.getOrCreateConversation(token);
+      if (!conversationId) {
+        this.windowManager.sendMessage('chat-response', 'Failed to create conversation. Please try again.');
+        return;
+      }
+
+      this.windowManager.sendMessage('loading-update', 'Processing audio...');
+      
+      // Upload audio buffer to S3
+      const audioResult = await this.audioService.uploadAudioBuffer(buffer, token, conversationId);
+      
+      if (audioResult) {
+        this.windowManager.sendMessage('loading-update', 'Analyzing with AI...');
+        
+        // Get AI analysis for the audio (this creates the AI response message)
+        const aiAnalysis = await this.getAudioAnalysis(audioResult.audioUrl, conversationId, audioResult.messageId);
+        
+        this.lastAIResponse = aiAnalysis;
+        
+        console.log('🎤 Sending audio-with-analysis message to renderer:', {
+          analysis: aiAnalysis,
+          audioUrl: audioResult.audioUrl
+        });
+        
+        this.windowManager.sendMessage('audio-with-analysis', {
+          analysis: aiAnalysis,
+          audioUrl: audioResult.audioUrl
+        });
+
+        console.log('Combined audio analysis:', aiAnalysis);
+      } else {
+        this.windowManager.sendMessage('chat-response', 'Failed to upload or process audio. Please try again.');
+      }
+    } catch (error) {
+      console.error('Failed to process combined audio buffer:', error);
+      if (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (errorMessage.includes('402')) {
+          this.windowManager.sendMessage('toggle-insights-panel', true);
+          this.windowManager.sendMessage('chat-response', 'Your daily message limit has been reached. Please upgrade to continue or come back tomorrow.');
+        } else {
+          this.windowManager.sendMessage('chat-response', 'Failed to process your audio. Please try again.');
+        }
+      }
+    }
+  }
+
+  // Update a message with new content
+  private async updateMessage(token: string, conversationId: string, messageId: string, content: string): Promise<void> {
+    try {
+      // For now, we'll just log the update since the PATCH endpoint might not exist
+      console.log(`Would update message ${messageId} with content: ${content}`);
+      // TODO: Implement message update endpoint in the API
+    } catch (error) {
+      console.error('Failed to update message:', error);
+      throw error;
+    }
+  }
+}
+
+// ============================================================================
+// APP INITIALIZATION
+// ============================================================================
+
+const contextorApp = new ContextorApp();
+
+app.whenReady().then(() => {
+  contextorApp.initialize();
 });
 
 app.on('window-all-closed', () => {
@@ -239,748 +768,20 @@ app.on('window-all-closed', () => {
 });
 
 app.on('activate', () => {
-  if (mainWindow === null) {
-    createWindow();
+  if (!contextorApp.windowManager?.window) {
+    contextorApp.createWindow();
   }
 });
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
-  stopIdleTimer();
 });
 
-// Example IPC handler
-ipcMain.handle('get-message', async () => {
-  return 'Hello from the main process!';
-});
-
-async function captureScreen(): Promise<Buffer | null> {
-  try {
-    const primaryDisplay = screen.getPrimaryDisplay();
-    const { width, height } = primaryDisplay.size;
-    console.log('Screen size:', { width, height });
-
-    const sources = await desktopCapturer.getSources({
-      types: ['screen'],
-      thumbnailSize: { width, height },
-      fetchWindowIcons: false
-    });
-
-    if (sources.length === 0) {
-      console.error('No screen sources found');
-      return null;
-    }
-
-    const screenSource = sources[0];
-    console.log('Capturing display:', screenSource.name);
-    
-    const image = screenSource.thumbnail;
-    const size = image.getSize();
-    console.log('Image size:', size);
-
-    if (size.width === 0 || size.height === 0) {
-      console.error('Invalid image size:', size);
-      return null;
-    }
-
-    const buffer = image.toPNG();
-    if (buffer.length === 0) {
-      console.error('Generated buffer is empty');
-      return null;
-    }
-
-    console.log('Buffer size:', buffer.length);
-    return buffer;
-  } catch (error) {
-    console.error('Failed to capture screen:', error);
-    return null;
-  }
-}
-
-async function uploadScreenshotToS3AndGetUrl(buffer: Buffer): Promise<string | null> {
-  try {
-    const result = await uploadScreenshotToS3(buffer);
-    if (result.success && result.url) {
-      return result.url;
-    } else {
-      console.error('Failed to upload screenshot to S3:', result.error);
-      return null;
-    }
-  } catch (error) {
-    console.error('Failed to upload screenshot to S3:', error);
-    return null;
-  }
-}
-
-interface ScreenshotResult {
-  buffer: Buffer;
-  url: string;
-}
-
-async function takeScreenshot(mainWindow: BrowserWindow): Promise<ScreenshotResult | null> {
-  mainWindow.hide();
-  try {
-    await new Promise(resolve => setTimeout(resolve, 200));
-    const buffer = await captureScreen();
-    if (!buffer) return null;
-    
-    const screenshotUrl = await uploadScreenshotToS3AndGetUrl(buffer);
-    if (!screenshotUrl) return null;
-    
-    return { buffer, url: screenshotUrl };
-  } catch (error) {
-    console.error('Screenshot process failed:', error);
-    return null;
-  } finally {
-    mainWindow.show();
-  }
-}
-
-async function takeScreenshotFromUrl(mainWindow: BrowserWindow, url: string): Promise<ScreenshotResult | null> {
-  try {
-    // Create a new hidden browser window for capturing the URL
-    const screenshotWindow = new BrowserWindow({
-      width: 1920,
-      height: 1080,
-      show: false,
-      webPreferences: {
-        nodeIntegration: false,
-        contextIsolation: true,
-      },
-    });
-
-    await screenshotWindow.loadURL(url);
-    
-    // Wait for the page to load completely
-    await new Promise(resolve => setTimeout(resolve, 3000));
-    
-    // Capture the screenshot
-    const image = await screenshotWindow.capturePage();
-    const buffer = image.toPNG();
-    
-    // Close the screenshot window
-    screenshotWindow.close();
-    
-    // Upload to S3
-    const screenshotUrl = await uploadScreenshotToS3AndGetUrl(buffer);
-    if (!screenshotUrl) return null;
-    
-    return { buffer, url: screenshotUrl };
-  } catch (error) {
-    console.error('URL screenshot process failed:', error);
-    return null;
-  }
-}
-
-async function createScreenshotRecord(aiFeedback: string, imageUrl: string): Promise<void> {
-  try {
-    // Get auth token from the renderer process
-    const authToken = await getAuthTokenFromRenderer();
-    if (!authToken) {
-      console.log('No auth token available, skipping screenshot record creation');
-      return;
-    }
-
-    const response = await axios.post('https://contextor-api-c1cb32489441.herokuapp.com/screenshots', {
-      screenshot: {
-        url: imageUrl,  // Use the actual S3 URL
-        status: 'pending',
-        ai_feedback: aiFeedback
-      }
-    }, {
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${authToken}`
-      }
-    });
-    
-    console.log('Screenshot record created successfully:', response.data);
-  } catch (error) {
-    console.error('Failed to create screenshot record:', error);
-    if (axios.isAxiosError(error)) {
-      console.error('Response data:', error.response?.data);
-      console.error('Response status:', error.response?.status);
-    }
-  }
-}
-
-async function getAuthTokenFromRenderer(): Promise<string | null> {
-  return new Promise((resolve) => {
-    if (!mainWindow) {
-      resolve(null);
-      return;
-    }
-
-    // Request auth token from renderer
-    mainWindow.webContents.send('get-auth-token');
-    
-    // Listen for the response
-    const handleAuthToken = (_event: any, token: string | null) => {
-      ipcMain.removeListener('auth-token-response', handleAuthToken);
-      resolve(token);
-    };
-    
-    ipcMain.once('auth-token-response', handleAuthToken);
-    
-    // Timeout after 5 seconds
-    setTimeout(() => {
-      ipcMain.removeListener('auth-token-response', handleAuthToken);
-      resolve(null);
-    }, 5000);
-  });
-}
-
-async function transcribeWithWhisper(audioPath: string): Promise<string | null> {
-  try {
-    const resp = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(audioPath),
-      model: 'whisper-1',
-      response_format: 'verbose_json',
-      prompt: WHISPER_TRANSCRIPTION_PROMPT
-    });
-
-    if (!resp.text) return null;
-
-    // Process the transcription to identify speakers
-    const lines = resp.text.split('\n');
-    const processedLines = lines.map(line => {
-      // If the line already has a speaker label, keep it
-      if (line.match(/^Speaker \d+:/)) {
-        return line;
-      }
-      // Otherwise, assume it's a new speaker
-      return `Speaker 1: ${line}`;
-    });
-
-    return processedLines.join('\n');
-  } catch (error) {
-    console.error('Whisper transcription failed:', error);
-    return null;
-  }
-}
-
-async function startAudioRecording(): Promise<void> {
-  try {
-    const desktopPath = app.getPath('desktop');
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const outputPath = path.join(desktopPath, `recording-${timestamp}.m4a`);
-    lastRecordingPath = outputPath;
-    // Use ffmpeg to record system audio
-    recordingProcess = exec(`ffmpeg -f avfoundation -i ":0" -c:a aac -b:a 192k "${outputPath}"`);
-    console.log('Started recording to:', outputPath);
-  } catch (error) {
-    console.error('Failed to start recording:', error);
-  }
-}
-
-// audio
-// mandar mensagem para o S3
-// salvar dados no banco de dados (audio_id, user_id, created_at, updated_at)
-
-async function stopAudioRecording(): Promise<void> {
-  if (recordingProcess) {
-    try {
-      recordingProcess.kill('SIGINT');
-      recordingProcess = null;
-      console.log('Stopped recording');
-      if (lastRecordingPath && mainWindow) {
-        // Wait for file to be written
-        setTimeout(async () => {
-          const text = await transcribeWithWhisper(lastRecordingPath!);
-          if (!mainWindow) return;
-          const screenshotResult = await takeScreenshot(mainWindow);
-          if (text && screenshotResult) {
-            const chatResponse = await chatWithTextAndImage(text, screenshotResult.buffer);
-            
-            // Store the latest AI response and update activity
-            lastAIResponse = chatResponse;
-            updateLastActivity();
-            
-            mainWindow.webContents.send('chat-response', chatResponse);
-          }
-        }, 1000);
-      }
-    } catch (error) {
-      console.error('Failed to stop recording:', error);
-    }
-  }
-
-  if (recordingStream) {
-    try {
-      stopRecording();
-      recordingStream = null;
-      console.log('Stopped audio stream');
-    } catch (error) {
-      console.error('Failed to stop audio stream:', error);
-    }
-  }
-
-  if (transcriptionStream) {
-    try {
-      transcriptionStream.end();
-      transcriptionStream = null;
-      console.log('Stopped transcription');
-    } catch (error) {
-      console.error('Failed to stop transcription:', error);
-    }
-  }
-}
-
-// Listen for text sent from renderer
-ipcMain.on('send-text-to-main', (event, text: string) => {
-  // Update activity for any user input
-  updateLastActivity();
-  
-  if (text === 'minimize-to-tray') {
-    if (mainWindow) {
-      mainWindow.minimize();
-    }
-    return;
-  }
-  
-  if (text === 'take-screenshot') {
-    if (mainWindow) {
-      takeScreenshot(mainWindow).then(async (screenshotResult) => {
-        if (screenshotResult) {
-          try {
-            const imageAnalysis = await chatWithTextAndImage(
-              INTERVIEW_ASSISTANT_PROMPT,
-              screenshotResult.buffer
-            );
-            
-            // Store the latest AI response and update activity
-            lastAIResponse = imageAnalysis;
-            updateLastActivity();
-            
-            mainWindow?.webContents.send('screenshot-with-image', {
-              analysis: imageAnalysis,
-              imageUrl: screenshotResult.url
-            });
-            console.log('Image analysis:', imageAnalysis);
-            
-            // Create screenshot record in API
-            await createScreenshotRecord(imageAnalysis, screenshotResult.url);
-          } catch (error) {
-            console.error('Failed to analyze screenshot:', error);
-            mainWindow?.webContents.send('screenshot-analysis', 'Failed to analyze screenshot');
-          }
-        }
-      });
-    }
-    return;
-  }
-
-  if (text.startsWith('prompt-screenshot:')) {
-    const prompt = text.slice('prompt-screenshot:'.length);
-    if (mainWindow) {
-      takeScreenshot(mainWindow).then(async (screenshotResult) => {
-        if (screenshotResult) {
-          try {
-            const imageAnalysis = await chatWithTextAndImage(
-              prompt,
-              screenshotResult.buffer
-            );
-            
-            // Store the latest AI response and update activity
-            lastAIResponse = imageAnalysis;
-            updateLastActivity();
-            
-            mainWindow?.webContents.send('screenshot-with-image', {
-              analysis: imageAnalysis,
-              imageUrl: screenshotResult.url
-            });
-            
-            // Create screenshot record in API
-            await createScreenshotRecord(imageAnalysis, screenshotResult.url);
-          } catch (error) {
-            console.error('Failed to analyze screenshot:', error);
-            mainWindow?.webContents.send('screenshot-analysis', 'Failed to analyze screenshot');
-          }
-        }
-      });
-    }
-    return;
-  }
-
-  if (text.startsWith('prompt-transcription:')) {
-    const prompt = text.slice('prompt-transcription:'.length);
-    if (lastRecordingPath && mainWindow) {
-      transcribeWithWhisper(lastRecordingPath).then(async (transcription) => {
-        if (transcription) {
-          try {
-            const response = await chatWithText(
-              `${prompt}\n\nTranscription: ${transcription}`
-            );
-            
-            // Store the latest AI response and update activity
-            lastAIResponse = response;
-            updateLastActivity();
-            
-            mainWindow?.webContents.send('chat-response', response);
-          } catch (error) {
-            console.error('Failed to process transcription:', error);
-            mainWindow?.webContents.send('chat-response', 'Failed to process transcription');
-          }
-        } else {
-          mainWindow?.webContents.send('chat-response', 'No transcription available');
-        }
-      });
-    }
-    return;
-  }
-
-  if (text === 'initiate-payment') {
-    // Open Stripe payment link
-    shell.openExternal('https://www.contextor.app/en/pricing?electron=true');
-    return;
-  }
-
-  if (text.startsWith('screenshot-url:')) {
-    const url = text.slice('screenshot-url:'.length);
-    if (mainWindow) {
-      takeScreenshotFromUrl(mainWindow, url).then(async (screenshotResult) => {
-        if (screenshotResult) {
-          try {
-            const imageAnalysis = await chatWithTextAndImage(
-              `Analyze this screenshot from the URL: ${url}`,
-              screenshotResult.buffer
-            );
-            
-            // Store the latest AI response and update activity
-            lastAIResponse = imageAnalysis;
-            updateLastActivity();
-            
-            mainWindow?.webContents.send('screenshot-with-image', {
-              analysis: imageAnalysis,
-              imageUrl: screenshotResult.url
-            });
-            console.log('URL screenshot analysis:', imageAnalysis);
-            
-            // Create screenshot record in API
-            await createScreenshotRecord(imageAnalysis, screenshotResult.url);
-          } catch (error) {
-            console.error('Failed to analyze URL screenshot:', error);
-            mainWindow?.webContents.send('screenshot-analysis', 'Failed to analyze screenshot from URL');
-          }
-        } else {
-          mainWindow?.webContents.send('screenshot-analysis', 'Failed to create screenshot from URL');
-        }
-      });
-    }
-    return;
-  }
-
-  if (text === 'play') {
-    isPlaying = !isPlaying;
-    if (mainWindow) {
-      mainWindow.webContents.send('play-state-changed', isPlaying);
-      
-      if (isPlaying) {
-        startAudioRecording();
-      } else {
-        stopAudioRecording();
-      }
-    }
-    return;
-  }
-
-  // Handle general text input (not a special command)
-  if (mainWindow) {
-    processGeneralTextInput(text);
-  }
-  
-  console.log('Received text from renderer:', text);
-});
-
-// Handle window resize requests
-ipcMain.on('resize-window', (event, height: number) => {
-  if (mainWindow) {
-    mainWindow.setSize(320, height);
-  }
-});
-
-// Handle window move requests
-ipcMain.on('move-window', (event, x: number, y: number) => {
-  if (mainWindow) {
-    mainWindow.setPosition(x, y);
-  }
-});
-
-// Handle window size requests
-ipcMain.on('set-window-size', (event, width: number, height: number) => {
-  if (mainWindow) {
-    mainWindow.setSize(width, height);
-  }
-});
-
-async function chatWithTextAndImage(text: string, imageBuffer: Buffer): Promise<string> {
-  const imageBase64 = imageBuffer.toString('base64');
-  
-  const response = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
-    messages: [
-      {
-        role: 'user',
-        content: [
-          {
-            type: 'text',
-            text: text
-          },
-          {
-            type: 'image_url',
-            image_url: {
-              url: `data:image/png;base64,${imageBase64}`
-            }
-          }
-        ]
-      }
-    ],
-    max_tokens: 1000
-  });
-  
-  const content = response.choices[0]?.message?.content;
-  if (!content) {
-    throw new Error('No response content from AI');
-  }
-  return content;
-}
-
-async function chatWithText(text: string): Promise<string> {
-  const response = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
-    messages: [
-      {
-        role: 'user',
-        content: text
-      }
-    ],
-    max_tokens: 1000
-  });
-  
-  const content = response.choices[0]?.message?.content;
-  if (!content) {
-    throw new Error('No response content from AI');
-  }
-  return content;
-}
-
-async function processGeneralTextInput(userText: string): Promise<void> {
-  try {
-    // Update activity time
-    updateLastActivity();
-    
-    // Combine the latest AI response with the user's new text
-    let combinedPrompt = userText;
-    if (lastAIResponse) {
-      combinedPrompt = `Previous AI response: ${lastAIResponse}\n\nUser's new input: ${userText}\n\nPlease consider both the previous response and the new input to provide a helpful response.`;
-    }
-    
-    // Send to OpenAI
-    const aiResponse = await chatWithText(combinedPrompt);
-    
-    // Store the latest response
-    lastAIResponse = aiResponse;
-    
-    // Send response to the insights panel
-    if (mainWindow) {
-      mainWindow.webContents.send('chat-response', aiResponse);
-    }
-    
-    console.log('Processed general text input:', userText);
-    console.log('AI response:', aiResponse);
-  } catch (error) {
-    console.error('Failed to process general text input:', error);
-    if (mainWindow) {
-      mainWindow.webContents.send('chat-response', 'Failed to process your message. Please try again.');
-    }
-  }
-}
-
-function updateLastActivity(): void {
-  lastActivityTime = Date.now();
-  isIdlePromptShown = false;
-  console.log('🔄 Activity updated at:', new Date(lastActivityTime).toISOString());
-}
-
-function startIdleTimer(): void {
-  // Clear existing interval
-  if (idleCheckInterval) {
-    clearInterval(idleCheckInterval);
-  }
-  
-  console.log('Starting idle timer...');
-  
-  // Check for idle state every 5 seconds (for testing - change to 30000 for production)
-  idleCheckInterval = setInterval(() => {
-    const now = Date.now();
-    const timeSinceLastActivity = now - lastActivityTime;
-    const idleTimeoutMs = 10 * 1000; // 10 seconds (for testing - change to 3 * 60 * 1000 for production)
-    
-    console.log(`Idle check: ${timeSinceLastActivity}ms since last activity, timeout: ${idleTimeoutMs}ms, prompt shown: ${isIdlePromptShown}`);
-    
-    if (timeSinceLastActivity >= idleTimeoutMs && !isIdlePromptShown && mainWindow) {
-      showIdlePrompt();
-    }
-  }, 3 * 60 * 1000);
-}
-
-function showIdlePrompt(): void {
-  if (!mainWindow || isIdlePromptShown) return;
-  
-  isIdlePromptShown = true;
-  console.log('Showing idle prompt after 3 minutes of inactivity');
-  
-  mainWindow.webContents.send('idle-prompt', {
-    message: 'Do you have any more questions? Can we end the conversation?',
-    buttons: [
-      { id: 'yes', text: 'Yes, end conversation' },
-      { id: 'no', text: 'No, continue' }
-    ]
-  });
-}
-
-function stopIdleTimer(): void {
-  if (idleCheckInterval) {
-    clearInterval(idleCheckInterval);
-    idleCheckInterval = null;
-  }
-}
-
-function createChatWindow() {
-  if (chatWindow) {
-    chatWindow.focus();
-    return;
-  }
-  const primaryDisplay = screen.getPrimaryDisplay();
-  chatWindow = new BrowserWindow({
-    width: 300,
-    height: 600,
-    x: 0,
-    y: 80, // below the main bar
-    frame: false,
-    alwaysOnTop: true,
-    resizable: true,
-    transparent: false,
-    title: 'Contextor Chat',
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js'),
-    },
-  });
-  if (isDev) {
-    chatWindow.loadURL('http://localhost:8080?chat=1');
-  } else {
-    chatWindow.loadFile(path.join(__dirname, '../dist/index.html'), { query: { chat: '1' } });
-  }
-  chatWindow.on('closed', () => {
-    chatWindow = null;
-  });
-}
-
-function closeChatWindow() {
-  if (chatWindow) {
-    chatWindow.close();
-    chatWindow = null;
-  }
-}
-
-ipcMain.on('open-chat-window', () => {
-  createChatWindow();
-});
-
-ipcMain.on('close-chat-window', () => {
-  closeChatWindow();
-});
-
-ipcMain.on('open-external', (event, url: string) => {
-  shell.openExternal(url);
-});
-
-// Handle idle prompt responses
-ipcMain.on('idle-response', (event, response: string) => {
-  if (response === 'yes') {
-    // Hide the insights panel
-    if (mainWindow) {
-      mainWindow.webContents.send('hide-insights-panel');
-      console.log('User chose to end conversation - hiding insights panel');
-    }
-    stopIdleTimer();
-  } else if (response === 'no') {
-    // Reset the timer and continue
-    updateLastActivity();
-    console.log('User chose to continue conversation - resetting idle timer');
-  }
-  
-  isIdlePromptShown = false;
-});
-
-// Handle protocol URL (for auth callback)
 app.on('open-url', (event, url) => {
   event.preventDefault();
-  
   if (url.startsWith('contextor-auth://')) {
-    const urlObj = new URL(url);
-    const token = urlObj.searchParams.get('token');
-    const user = urlObj.searchParams.get('user');
-    const expiresAt = urlObj.searchParams.get('expires_at');
-    
-    if (token && mainWindow) {
-      // Send auth data to renderer
-      mainWindow.webContents.send('auth-callback', {
-        token,
-        user: user ? JSON.parse(decodeURIComponent(user)) : null,
-        expires_at: expiresAt
-      });
-    }
-  }
-
-  if (url.startsWith('contextor-payment://')) {
-    const urlObj = new URL(url);
-    const success = urlObj.searchParams.get('success');
-    const sessionId = urlObj.searchParams.get('session_id');
-    
-    if (success === 'true' && mainWindow) {
-      // Send payment confirmation to renderer
-      mainWindow.webContents.send('payment-callback', {
-        status: 'success',
-        session_id: sessionId
-      });
-    }
+    contextorApp.handleAuthProtocol(url);
+  } else if (url.startsWith('contextor-payment://')) {
+    contextorApp.handlePaymentProtocol(url);
   }
 });
-
-// Handle auth callback on Windows/Linux via command line
-if (process.platform === 'win32' || process.platform === 'linux') {
-  const authUrl = process.argv.find(arg => arg.startsWith('contextor-auth://'));
-  if (authUrl) {
-    const urlObj = new URL(authUrl);
-    const token = urlObj.searchParams.get('token');
-    const user = urlObj.searchParams.get('user');
-    const expiresAt = urlObj.searchParams.get('expires_at');
-    
-    if (token) {
-      // Store auth data temporarily to send to renderer when ready
-      (global as any).authCallback = {
-        token,
-        user: user ? JSON.parse(decodeURIComponent(user)) : null,
-        expires_at: expiresAt
-      };
-    }
-  }
-
-  const paymentUrl = process.argv.find(arg => arg.startsWith('contextor-payment://'));
-  if (paymentUrl) {
-    const urlObj = new URL(paymentUrl);
-    const success = urlObj.searchParams.get('success');
-    const sessionId = urlObj.searchParams.get('session_id');
-    
-    if (success === 'true') {
-      // Store payment data temporarily to send to renderer when ready
-      (global as any).paymentCallback = {
-        status: 'success',
-        session_id: sessionId
-      };
-    }
-  }
-}

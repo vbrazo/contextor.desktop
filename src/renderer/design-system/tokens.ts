@@ -52,7 +52,7 @@ export const tokens = {
   // Typography
   typography: {
     fontFamily: {
-      system: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
+      system: 'Helvetica, "Helvetica Neue", Arial, sans-serif',
     },
     fontSize: {
       xs: '12px',
@@ -121,4 +121,4 @@ export const tokens = {
   },
 } as const;
 
-export type Tokens = typeof tokens; 
+export type Tokens = typeof tokens;
