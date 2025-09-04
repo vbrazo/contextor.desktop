@@ -9,7 +9,6 @@
   "author": "Contextor",
   "license": "ISC",
   "dependencies": {
-<<<<<<< Updated upstream
     "@google-cloud/speech": "^7.1.0",
     "@google/generative-ai": "^0.24.1",
     "@types/react-syntax-highlighter": "^15.5.13",
@@ -57,6 +56,3 @@
     "webpack-dev-server": "^4.0.0"
   }
 }
-=======
-}
->>>>>>> Stashed changes
